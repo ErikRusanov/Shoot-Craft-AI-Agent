@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Pre-commit gate: lint + format check + strict types.
+# Wired via `make setup` (core.hooksPath = .githooks). Skip once with `git commit --no-verify`.
+set -euo pipefail
+
+echo "pre-commit: lint"
+make lint
+
+echo "pre-commit: type"
+make type
