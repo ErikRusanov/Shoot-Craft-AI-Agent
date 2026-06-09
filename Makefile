@@ -1,8 +1,11 @@
-.PHONY: help setup sync lint fmt type test run
+.PHONY: help setup sync lint fmt type test run presets-dev presets-build
 .DEFAULT_GOAL := help
 
+# Sibling checkout of the private preset library (override: make X PRESETS=...).
+PRESETS ?= ../presets
+
 help:   ## show this help
-	@grep -E '^[a-z]+:.*## ' $(MAKEFILE_LIST) | sort | awk -F ':.*## ' '{printf "  \033[36m%-7s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-z][a-z-]*:.*## ' $(MAKEFILE_LIST) | sort | awk -F ':.*## ' '{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 setup:  ## bootstrap dev env: install uv, sync deps, wire git hooks
 	@command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -29,3 +32,12 @@ test:   ## run tests (pass ARGS=... for a single test)
 
 run:    ## run the worker
 	PYTHONPATH=src uv run python -m main
+
+presets-dev:   ## local dev: editable-install the private library (PRESETS=../presets) for PRESET_SOURCE=package
+	uv pip install -e $(PRESETS)
+	@echo "installed photocore-presets (editable). NOTE: 'make sync' prunes it — re-run after sync."
+	@echo "then set PRESET_SOURCE=package in .env (no PRESET_LIBRARY_PATH needed)."
+
+presets-build: ## build the private library wheel (PRESETS=../presets) into its dist/
+	uv build --wheel $(PRESETS)
+	@echo "wheel written to $(PRESETS)/dist — feed it to the private Docker image."

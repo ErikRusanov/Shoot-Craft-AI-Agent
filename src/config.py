@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # package (prod, importlib.resources), path (dev/custom dir), or the in-repo
     # examples/ fallback when nothing is configured.
     preset_source: Literal["package", "path", "examples"] = "examples"
+    # Distribution to read in 'package' mode. Only a name as a string lives here —
+    # the core never depends on this package; the private image installs it.
+    preset_package: str = "photocore_presets"
     preset_library_path: str | None = None
 
     # --- Generation loop / budget safety ---

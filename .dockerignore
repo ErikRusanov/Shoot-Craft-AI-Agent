@@ -1,0 +1,24 @@
+# Build context hygiene — keep the image and its layers small and reproducible.
+.git
+.gitignore
+.githooks
+
+# Local dev env / caches
+.venv
+.env
+.storage
+__pycache__/
+*.pyc
+.mypy_cache
+.ruff_cache
+.pytest_cache
+
+# Tests and docs are not needed at runtime
+tests/
+README.md
+CLAUDE.md
+LICENSE
+
+# Only the MIT demo set belongs in the public image. The private library is
+# never checked out under presets/ here — it is layered on in the private image.
+presets/dist/

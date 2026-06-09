@@ -1,0 +1,76 @@
+# DEMO preset — MIT, ships in the public repo so the core runs out of the box.
+# This is NOT the curated library (the moat); it only exercises the loader and
+# the schema. Keep it minimal and generic.
+id: demo_headshot
+version: 1.0.0
+
+applies_to:
+  use_case: [headshot, resume]
+  gender: [male, female, any]
+  age: [18, 75]
+
+identity_instruction: >-
+  Preserve the exact facial identity of the person in the reference photo: the
+  same face geometry, eyes, nose, lips, jawline, skin tone, and any moles or
+  scars. Do not beautify, slim, age, or restyle the face. Reproduce a faithful,
+  recognizable likeness of the same individual.
+
+prompt_structure: >-
+  Professional head-and-shoulders headshot of the person, wearing {attire},
+  with {expression}, photographed against {background}. Intended for {purpose}.
+  Soft, even lighting, sharp focus on the eyes, natural skin texture,
+  photorealistic, high detail.
+
+negative_prompt: >-
+  cartoon, illustration, 3d render, plastic or waxy skin, over-smoothed skin,
+  beauty filter, distorted or asymmetric face, extra fingers, watermark, text,
+  logo, low resolution, blurry, oversaturated, different person.
+
+slots:
+  purpose:
+    required: true
+    ask: true
+    default: "a general professional headshot"
+    enum:
+      - "a general professional headshot"
+      - "a resume or CV photo"
+  attire:
+    required: false
+    ask: false
+    default: "smart business-casual clothing in a solid, neutral color"
+    enum:
+      - "smart business-casual clothing in a solid, neutral color"
+      - "a simple dark blazer over a plain top"
+  expression:
+    required: false
+    ask: false
+    default: "a calm, confident closed-mouth smile"
+    enum:
+      - "a calm, confident closed-mouth smile"
+      - "a neutral, composed expression"
+  background:
+    required: false
+    ask: false
+    default: "a softly blurred neutral interior"
+    enum:
+      - "a softly blurred neutral interior"
+      - "a clean light-grey studio backdrop"
+
+generation:
+  temperature: 0.45
+  aspect_ratio: "4:5"
+  face_media_resolution: high
+
+thresholds:
+  similarity_threshold: 0.62  # placeholder; calibrate on real pipeline output
+  identity_floor: 0.50  # placeholder
+  K_max_retries: 3
+
+compositions:
+  - id: studio_clean
+    label: "Studio — clean grey backdrop"
+    slot_overrides:
+      background: "a clean light-grey studio backdrop"
+      expression: "a neutral, composed expression"
+
+anchor_examples: []

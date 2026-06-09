@@ -1,0 +1,69 @@
+# DEMO preset — MIT, ships in the public repo so the core runs out of the box.
+# This is NOT the curated library (the moat); it only exercises the loader and
+# the schema. Keep it minimal and generic.
+id: demo_avatar
+version: 1.0.0
+
+applies_to:
+  use_case: [avatar, profile]
+  gender: [male, female, any]
+  age: [12, 99]
+
+identity_instruction: >-
+  Preserve the exact facial identity of the person in the reference photo: the
+  same face geometry, eyes, nose, lips, jawline, skin tone, and any moles or
+  scars. Do not beautify, slim, age, or restyle the face. Reproduce a faithful,
+  recognizable likeness of the same individual.
+
+prompt_structure: >-
+  Clean head-and-shoulders profile avatar of the person, with {expression},
+  looking at the camera, photographed against {background}. Intended for
+  {purpose}. Photorealistic, natural skin texture, soft even lighting, sharp
+  focus.
+
+negative_prompt: >-
+  cartoon, illustration, 3d render, plastic or waxy skin, beauty filter,
+  distorted face, extra fingers, watermark, text, logo, low resolution, blurry,
+  different person.
+
+slots:
+  purpose:
+    required: true
+    ask: true
+    default: "a general profile avatar"
+    enum:
+      - "a general profile avatar"
+      - "a chat or forum avatar"
+  expression:
+    required: false
+    ask: false
+    default: "a relaxed, friendly closed-mouth smile"
+    enum:
+      - "a relaxed, friendly closed-mouth smile"
+      - "a neutral expression"
+  background:
+    required: false
+    ask: false
+    default: "a plain, softly lit neutral background"
+    enum:
+      - "a plain, softly lit neutral background"
+      - "a clean light-grey backdrop"
+
+generation:
+  temperature: 0.50
+  aspect_ratio: "1:1"
+  face_media_resolution: high
+
+thresholds:
+  similarity_threshold: 0.60  # placeholder; calibrate on real pipeline output
+  identity_floor: 0.50  # placeholder
+  K_max_retries: 3
+
+compositions:
+  - id: neutral_grey
+    label: "Neutral — light-grey backdrop"
+    slot_overrides:
+      background: "a clean light-grey backdrop"
+      expression: "a neutral expression"
+
+anchor_examples: []
