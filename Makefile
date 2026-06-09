@@ -8,6 +8,7 @@ setup:  ## bootstrap dev env: install uv, sync deps, wire git hooks
 	@command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 	$(MAKE) sync
 	git config core.hooksPath .githooks
+	@test -f .env || { cp .env.example .env && echo "created .env from .env.example"; }
 
 sync:   ## install/sync env from the lock
 	uv sync
@@ -27,4 +28,4 @@ test:   ## run tests (pass ARGS=... for a single test)
 	uv run pytest $(ARGS)
 
 run:    ## run the worker
-	PYTHONPATH=src uv run uvicorn api.app:app
+	PYTHONPATH=src uv run python -m main
