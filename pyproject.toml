@@ -1,0 +1,58 @@
+[project]
+name = "photocore"
+version = "0.1.0"
+description = "Core agent for a single AI photoshoot session: identity-preserving photoreal image generation"
+authors = [
+    { name = "Erik Rusanov", email = "erik.rusanov.03@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.136.3",
+    "httpx>=0.28.1",
+    "insightface>=1.0.1",
+    "langgraph>=1.2.4",
+    "langgraph-checkpoint-redis>=0.4.1",
+    "numpy>=2.4.6",
+    "onnxruntime>=1.26.0",
+    "pillow>=12.2.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+    "pyyaml>=6.0.3",
+    "redis>=7.4.1",
+    "sse-starlette>=3.4.4",
+    "structlog>=26.1.0",
+    "tenacity>=9.1.4",
+    "uvicorn[standard]>=0.49.0",
+]
+
+# Application, not a library: no build backend, source lives flat under src/.
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "mypy>=2.1.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.15.16",
+    "types-pyyaml>=6.0.12.20260518",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
