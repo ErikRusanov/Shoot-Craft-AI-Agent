@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     port: int = 8000
     reload: bool = False  # uvicorn autoreload, dev only
 
+    # --- Connector wiring (DI) ---
+    # 'fake' binds the in-memory test doubles (walking skeleton / local dev);
+    # 'real' will bind Redis/OpenRouter/InsightFace/S3 once those connectors land.
+    connectors: Literal["fake", "real"] = "fake"
+
     # --- Logging ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_json: bool = False  # structured JSON in prod, pretty console in dev
