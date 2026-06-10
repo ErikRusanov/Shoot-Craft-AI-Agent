@@ -1,0 +1,468 @@
+"""Generation loop: the money- and identity-critical invariants, on fakes.
+
+The per-attempt similarity is scripted through ``ScriptedSimilarityEmbedder``
+(the loop runs the *real* ``FaceCheckService``), the generator is the recording
+fake, and state/budget/idempotency sit on the in-memory store. What is pinned:
+
+- keep-best — a worse or below-floor later attempt never displaces the best;
+- below ``identity_floor`` nothing is ever delivered;
+- budget exhaustion ends in a clean ``failed`` (or delivers the existing best);
+- retries stop at K (and at the config runaway ceiling);
+- a transport failure costs no budget slot;
+- re-entry with the same ``idem_key`` replays the recorded outcome;
+- the paid frame is checkpointed (provider id + result ref) before face-check.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import pytest
+from numpy.typing import NDArray
+
+from protocols import Embedder
+from schemas import (
+    AppliesTo,
+    Event,
+    FaceProfile,
+    FailedEvent,
+    FrameMetrics,
+    FsmState,
+    GateReason,
+    Generation,
+    Preset,
+    ResultEvent,
+    RiskLevel,
+    SessionState,
+    Slot,
+    Thresholds,
+    Verdict,
+)
+from services.budget import BudgetService
+from services.facecheck import FaceCheckService
+from services.generation_loop import IDENTITY_EMPHASIS, GenerationLoop
+from services.idempotency import IdempotencyService
+from tests.fakes import (
+    FixedImageGenerator,
+    FlakyImageGenerator,
+    InMemoryEventBus,
+    InMemoryObjectStorage,
+    InMemoryStateStore,
+    ScriptedSimilarityEmbedder,
+    axis_embedding,
+)
+
+TTL = 3600
+SESSION_KEY = "sess-1"
+FACE_KEY = "face-1"
+PHOTO_REF = "photos/face-1"
+REFERENCE_PHOTO = b"reference-photo-bytes"
+
+IDENTITY_INSTRUCTION = "Keep the exact same face as in the reference photo."
+PROMPT_STRUCTURE = "Avatar of the person in {style} style."
+
+
+class RecordingBus(InMemoryEventBus):
+    """The in-memory bus plus a flat publish log for order/content assertions."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[Event] = []
+
+    async def publish(self, session_key: str, event: Event) -> str:
+        self.events.append(event)
+        return await super().publish(session_key, event)
+
+    @property
+    def types(self) -> list[str]:
+        return [event.type for event in self.events]
+
+
+def make_preset(*, k: int = 3, temperature: float = 0.4) -> Preset:
+    return Preset(
+        id="test_avatar",
+        version="1.0.0",
+        applies_to=AppliesTo(use_case=["avatar"], gender=["male", "female"]),
+        identity_instruction=IDENTITY_INSTRUCTION,
+        prompt_structure=PROMPT_STRUCTURE,
+        negative_prompt="cartoon, different person",
+        slots={"style": Slot(required=True, default="studio", enum=["studio", "outdoor"])},
+        generation=Generation(
+            temperature=temperature, aspect_ratio="1:1", face_media_resolution="high"
+        ),
+        thresholds=Thresholds(similarity_threshold=0.8, identity_floor=0.5, K_max_retries=k),
+    )
+
+
+def make_face() -> FaceProfile:
+    return FaceProfile(
+        face_key=FACE_KEY,
+        embedding=axis_embedding(),
+        gate_verdict=Verdict.PASSED,
+        gate_reason=GateReason.OK,
+        metrics=FrameMetrics(
+            face_count=1,
+            face_area_ratio=0.25,
+            face_side=320.0,
+            blur_var=500.0,
+            yaw=0.0,
+            pitch=0.0,
+            roll=0.0,
+            brightness=120.0,
+            width=1024,
+            height=1024,
+        ),
+        photo_ref=PHOTO_REF,
+    )
+
+
+@dataclass
+class Harness:
+    loop: GenerationLoop
+    store: InMemoryStateStore
+    storage: InMemoryObjectStorage
+    bus: RecordingBus
+    generator: FixedImageGenerator
+    preset: Preset
+
+    async def run(
+        self, *, face_crop: bytes | None = None, idem_key: str = "op-1"
+    ) -> ResultEvent | FailedEvent:
+        return await self.loop.run(
+            session_key=SESSION_KEY, preset=self.preset, idem_key=idem_key, face_crop=face_crop
+        )
+
+    async def session(self) -> SessionState:
+        session = await self.store.get_session(SESSION_KEY)
+        assert session is not None
+        return session
+
+    async def assert_budget_consumed(self, expected: int) -> None:
+        """Pin the exact counter value via two probes (the port has no read).
+
+        Refusing at ``limit=expected`` proves ``used >= expected`` (a refusal
+        does not increment); accepting at ``limit=expected + 1`` then proves
+        ``used == expected``. The second probe's own increment lands after
+        every assertion that matters.
+        """
+        store = self.store
+        assert not await store.check_and_incr_budget(
+            SESSION_KEY, limit=expected, ttl_seconds=TTL
+        ), f"budget counter is below {expected}"
+        assert await store.check_and_incr_budget(
+            SESSION_KEY, limit=expected + 1, ttl_seconds=TTL
+        ), f"budget counter is above {expected}"
+
+
+async def make_harness(
+    *,
+    similarities: list[float | None] | None = None,
+    embedder: Embedder | None = None,
+    generator: FixedImageGenerator | None = None,
+    budget_limit: int = 10,
+    k: int = 3,
+    max_iterations: int = 8,
+    temperature: float = 0.4,
+) -> Harness:
+    store = InMemoryStateStore()
+    storage = InMemoryObjectStorage()
+    bus = RecordingBus()
+    gen = generator if generator is not None else FixedImageGenerator()
+    preset = make_preset(k=k, temperature=temperature)
+
+    await storage.put(PHOTO_REF, REFERENCE_PHOTO)
+    await store.put_face(make_face(), ttl_seconds=TTL)
+    await store.put_session(
+        SessionState(
+            session_key=SESSION_KEY,
+            face_key=FACE_KEY,
+            slots={"style": "studio"},
+            thresholds=preset.thresholds,
+            budget_limit=budget_limit,
+        ),
+        ttl_seconds=TTL,
+    )
+
+    emb = embedder if embedder is not None else ScriptedSimilarityEmbedder(similarities or [])
+    loop = GenerationLoop(
+        store=store,
+        storage=storage,
+        bus=bus,
+        generator=gen,
+        facecheck=FaceCheckService(emb),
+        budget=BudgetService(store),
+        idempotency=IdempotencyService(store),
+        session_ttl_seconds=TTL,
+        face_ttl_seconds=TTL,
+        max_iterations=max_iterations,
+    )
+    return Harness(loop=loop, store=store, storage=storage, bus=bus, generator=gen, preset=preset)
+
+
+# --- happy path ---
+
+
+async def test_first_attempt_passes_and_delivers() -> None:
+    h = await make_harness(similarities=[0.9])
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)
+    assert result.best.iteration_n == 1
+    assert result.best.similarity == pytest.approx(0.9, abs=1e-6)
+    assert result.best.verdict is Verdict.PASSED
+    assert result.best.risk_level is RiskLevel.LOW
+    assert await h.storage.get(result.best.result_ref) == h.generator.image
+
+    assert len(h.generator.calls) == 1
+    assert h.generator.calls[0].reference_count == 1
+    assert h.generator.calls[0].face_crop is None  # first attempt: plain reference
+
+    session = await h.session()
+    assert session.fsm_state is FsmState.DONE
+    assert [it.charged for it in session.iterations] == [True]
+    assert h.bus.types == ["iteration_start", "iteration_result", "result"]
+    await h.assert_budget_consumed(1)
+
+
+async def test_soft_then_pass_keeps_the_better_frame() -> None:
+    h = await make_harness(similarities=[0.6, 0.9])
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)
+    assert result.best.iteration_n == 2
+    assert result.best.verdict is Verdict.PASSED
+    assert len(h.generator.calls) == 2  # stopped on pass, not on K
+    assert h.bus.types == [
+        "iteration_start",
+        "iteration_result",
+        "retry",
+        "iteration_start",
+        "iteration_result",
+        "result",
+    ]
+    await h.assert_budget_consumed(2)
+
+    face = await h.store.get_face(FACE_KEY)
+    assert face is not None
+    assert face.convergence.attempts == 2
+    assert face.convergence.best_similarity == pytest.approx(0.9, abs=1e-6)
+    assert face.convergence.improved_last is True
+
+
+# --- keep-best ---
+
+
+async def test_failed_risk_attempt_does_not_clobber_passed_frame() -> None:
+    # Attempt 1 lands soft (deliverable at risk), attempt 2 collapses below the
+    # floor. The kept best must remain attempt 1, untouched.
+    h = await make_harness(similarities=[0.7, 0.3], k=1)
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)
+    assert result.best.iteration_n == 1
+    assert result.best.similarity == pytest.approx(0.7, abs=1e-6)
+    assert result.best.verdict is Verdict.SOFT
+    assert result.best.risk_level is RiskLevel.MEDIUM
+
+    session = await h.session()
+    assert session.iterations[1].verdict is Verdict.BELOW_FLOOR
+    assert session.best_result is not None
+    assert session.best_result.result_ref == session.iterations[0].result_ref
+
+    face = await h.store.get_face(FACE_KEY)
+    assert face is not None
+    assert face.convergence.improved_last is False
+    assert face.convergence.best_similarity == pytest.approx(0.7, abs=1e-6)
+
+
+async def test_equal_or_worse_soft_attempt_keeps_the_earlier_frame() -> None:
+    h = await make_harness(similarities=[0.7, 0.7, 0.6], k=2)
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)
+    assert result.best.iteration_n == 1  # strictly-better wins; ties keep the first
+
+
+# --- identity floor ---
+
+
+async def test_below_floor_is_never_delivered() -> None:
+    h = await make_harness(similarities=[0.4, 0.3, 0.2], k=2)
+    result = await h.run()
+
+    assert isinstance(result, FailedEvent)
+    assert "identity floor" in result.reason
+    assert "result" not in h.bus.types
+
+    session = await h.session()
+    assert session.best_result is None
+    assert session.fsm_state is FsmState.FAILED
+    # Paid attempts stay paid even when undeliverable — no refunds.
+    await h.assert_budget_consumed(3)
+
+
+async def test_frame_that_lost_the_face_is_below_floor() -> None:
+    # The embedder's "no face" signal (a scripted None) must read as a failed
+    # attempt and trigger a retry, not crash the loop.
+    h = await make_harness(similarities=[None, 0.9], k=1)
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)
+    assert result.best.iteration_n == 2
+    session = await h.session()
+    assert session.iterations[0].similarity == 0.0
+    assert session.iterations[0].verdict is Verdict.BELOW_FLOOR
+
+
+# --- budget ---
+
+
+async def test_zero_budget_fails_cleanly_without_generating() -> None:
+    h = await make_harness(similarities=[], budget_limit=0)
+    result = await h.run()
+
+    assert isinstance(result, FailedEvent)
+    assert "budget" in result.reason
+    assert h.generator.calls == []
+    assert h.bus.types == ["failed"]  # no phantom iteration_start
+    assert (await h.session()).fsm_state is FsmState.FAILED
+
+
+async def test_budget_exhaustion_mid_loop_delivers_the_kept_best() -> None:
+    # Two paid soft attempts, then the third reservation is refused: the loop
+    # must stop and ship the best soft frame instead of erroring out.
+    h = await make_harness(similarities=[0.6, 0.7], budget_limit=2, k=5)
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)
+    assert result.best.iteration_n == 2
+    assert result.best.similarity == pytest.approx(0.7, abs=1e-6)
+    assert result.best.verdict is Verdict.SOFT
+    assert len(h.generator.calls) == 2
+    await h.assert_budget_consumed(2)
+
+
+async def test_network_failure_does_not_eat_budget() -> None:
+    # With budget for exactly one generation, a transport failure on the first
+    # call must leave the slot for the retry — which then succeeds.
+    h = await make_harness(
+        similarities=[0.9], generator=FlakyImageGenerator(failures=1), budget_limit=1
+    )
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)
+    assert len(h.generator.calls) == 2  # one failed, one delivered
+
+    session = await h.session()
+    assert [it.charged for it in session.iterations] == [False, True]
+    assert session.iterations[0].provider_request_id is None
+    assert session.iterations[0].result_ref is None
+    await h.assert_budget_consumed(1)
+
+
+async def test_persistent_generator_failure_fails_cleanly() -> None:
+    h = await make_harness(
+        similarities=[], generator=FlakyImageGenerator(failures=99), budget_limit=5, k=1
+    )
+    result = await h.run()
+
+    assert isinstance(result, FailedEvent)
+    assert "generation failed" in result.reason
+    session = await h.session()
+    assert [it.charged for it in session.iterations] == [False, False]
+    assert (await h.session()).fsm_state is FsmState.FAILED
+    # One slot was reserved up front and carried across both dead attempts;
+    # it is lost with the session (no refunds), but never multiplied.
+    await h.assert_budget_consumed(1)
+
+
+# --- retry policy ---
+
+
+async def test_k_max_retries_is_respected() -> None:
+    h = await make_harness(similarities=[0.6] * 4, k=3, budget_limit=99)
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)  # soft keep-best ships when K runs out
+    assert len(h.generator.calls) == 4  # the first attempt + exactly K retries
+    assert h.bus.types.count("retry") == 3
+
+
+async def test_runaway_ceiling_caps_attempts_below_k() -> None:
+    h = await make_harness(similarities=[0.6, 0.6], k=99, max_iterations=2)
+    await h.run()
+    assert len(h.generator.calls) == 2
+
+
+async def test_retry_strengthens_reference_without_rewriting_the_prompt() -> None:
+    h = await make_harness(similarities=[0.6, 0.9], temperature=0.4)
+    await h.run(face_crop=b"tight-face-crop")
+
+    first, second = h.generator.calls
+
+    # Attempt 1: the plain built prompt, preset knobs untouched, no crop.
+    assert IDENTITY_EMPHASIS not in first.prompt
+    assert first.params.temperature == pytest.approx(0.4)
+    assert first.face_crop is None
+
+    # Retry: identity emphasis appended, temperature halved, face crop attached.
+    assert IDENTITY_EMPHASIS in second.prompt
+    assert second.params.temperature == pytest.approx(0.2)
+    assert second.face_crop == b"tight-face-crop"
+
+    # Frozen blocks stay verbatim on both attempts — the retry only *appends*.
+    for call in (first, second):
+        assert call.prompt.startswith(IDENTITY_INSTRUCTION)
+        assert "Avatar of the person in studio style." in call.prompt
+        assert call.prompt.endswith("Strictly avoid: " + h.preset.negative_prompt)
+        assert call.params.aspect_ratio == h.preset.generation.aspect_ratio
+
+
+# --- idempotency ---
+
+
+async def test_idempotent_reentry_replays_the_same_result() -> None:
+    # The scripted embedder would raise on any extra embed call, so an equal
+    # second result also proves face-check never re-ran.
+    h = await make_harness(similarities=[0.9])
+    first = await h.run(idem_key="op-1")
+    second = await h.run(idem_key="op-1")
+
+    assert second == first
+    assert len(h.generator.calls) == 1
+    assert h.bus.types.count("result") == 1  # replay does not re-emit
+    await h.assert_budget_consumed(1)
+
+
+async def test_distinct_idem_keys_run_independently() -> None:
+    h = await make_harness(similarities=[0.9, 0.95])
+    first = await h.run(idem_key="op-1")
+    second = await h.run(idem_key="op-2")
+
+    assert isinstance(first, ResultEvent)
+    assert isinstance(second, ResultEvent)
+    assert len(h.generator.calls) == 2
+
+
+# --- write-ahead ---
+
+
+async def test_paid_frame_is_checkpointed_before_facecheck() -> None:
+    class ExplodingEmbedder:
+        async def embed(self, image: bytes) -> NDArray[np.float32]:
+            raise RuntimeError("face-check infrastructure died")
+
+    h = await make_harness(embedder=ExplodingEmbedder())
+    with pytest.raises(RuntimeError, match="face-check infrastructure died"):
+        await h.run()
+
+    # The crash hit *after* the paid frame became traceable: the checkpoint
+    # already carries the provider request id and the stored result ref.
+    session = await h.session()
+    (iteration,) = session.iterations
+    assert iteration.charged is True
+    assert iteration.provider_request_id is not None
+    assert iteration.result_ref == f"sessions/{SESSION_KEY}/iterations/1"
+    assert await h.storage.get(iteration.result_ref) == h.generator.image
+    assert iteration.similarity is None  # face-check never finished

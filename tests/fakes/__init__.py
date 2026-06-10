@@ -7,9 +7,13 @@ tests run against the real connectors.
 
 from __future__ import annotations
 
-from tests.fakes.embedder import DeterministicEmbedder
+from tests.fakes.embedder import (
+    DeterministicEmbedder,
+    ScriptedSimilarityEmbedder,
+    axis_embedding,
+)
 from tests.fakes.face_analyzer import ScriptedFaceAnalyzer
-from tests.fakes.generator import FixedImageGenerator, GenerateCall
+from tests.fakes.generator import FixedImageGenerator, FlakyImageGenerator, GenerateCall
 from tests.fakes.slot_filler import FillCall, FixedSlotFiller
 from tests.fakes.storage import InMemoryObjectStorage
 from tests.fakes.store import InMemoryEventBus, InMemoryStateStore
@@ -19,9 +23,12 @@ __all__ = [
     "FillCall",
     "FixedImageGenerator",
     "FixedSlotFiller",
+    "FlakyImageGenerator",
     "GenerateCall",
     "InMemoryEventBus",
     "InMemoryObjectStorage",
     "InMemoryStateStore",
     "ScriptedFaceAnalyzer",
+    "ScriptedSimilarityEmbedder",
+    "axis_embedding",
 ]

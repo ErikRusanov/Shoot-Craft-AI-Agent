@@ -57,3 +57,35 @@ class FixedImageGenerator:
         self.calls.append(GenerateCall(prompt, params, len(reference_images), face_crop))
         rid = "fake-" + hashlib.sha256(prompt.encode()).hexdigest()[:16]
         return GeneratedImage(self.image, rid)
+
+
+class FlakyImageGenerator(FixedImageGenerator):
+    """Fails the first ``failures`` calls with ``ConnectionError``, then succeeds.
+
+    The stand-in for a provider whose transport gave out after the connector's
+    own transient retries — the loop must treat such an attempt as unpaid.
+    Failed calls are recorded in ``calls`` like successful ones.
+    """
+
+    def __init__(self, *, failures: int, image: bytes = _PIXEL_PNG) -> None:
+        super().__init__(image)
+        self._failures_left = failures
+
+    async def generate(
+        self,
+        *,
+        prompt: str,
+        params: Generation,
+        reference_images: Sequence[bytes],
+        face_crop: bytes | None = None,
+    ) -> GeneratedImage:
+        if self._failures_left > 0:
+            self._failures_left -= 1
+            self.calls.append(GenerateCall(prompt, params, len(reference_images), face_crop))
+            raise ConnectionError("provider unreachable")
+        return await super().generate(
+            prompt=prompt,
+            params=params,
+            reference_images=reference_images,
+            face_crop=face_crop,
+        )
