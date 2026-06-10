@@ -32,7 +32,8 @@ from utils import images
 
 THRESHOLDS = GateThresholds(
     min_side=256,
-    min_face_area_ratio=0.05,
+    min_face_side=128.0,
+    max_secondary_face_ratio=0.25,
     min_blur_var=50.0,
     max_yaw=35.0,
     max_pitch=25.0,
@@ -48,6 +49,8 @@ def make_metrics(**overrides: Any) -> FrameMetrics:
     values: dict[str, Any] = {
         "face_count": 1,
         "face_area_ratio": 0.25,
+        "face_side": 320.0,
+        "secondary_face_ratio": 0.0,
         "blur_var": 500.0,
         "yaw": 5.0,
         "pitch": -3.0,
@@ -100,9 +103,9 @@ def test_good_metrics_pass() -> None:
     ("overrides", "reason"),
     [
         ({"face_count": 0}, GateReason.NO_FACE),
-        ({"face_count": 2}, GateReason.MULTIPLE_FACES),
+        ({"face_count": 2, "secondary_face_ratio": 0.8}, GateReason.MULTIPLE_FACES),
         ({"width": 200, "height": 640}, GateReason.LOW_RESOLUTION),
-        ({"face_area_ratio": 0.01}, GateReason.FACE_TOO_SMALL),
+        ({"face_side": 64.0}, GateReason.FACE_TOO_SMALL),
         ({"blur_var": 10.0}, GateReason.BLURRY),
         ({"yaw": 80.0}, GateReason.EXTREME_POSE),
         ({"pitch": -40.0}, GateReason.EXTREME_POSE),
@@ -115,6 +118,13 @@ def test_each_threshold_names_its_reason(overrides: dict[str, Any], reason: Gate
     result = GATE.evaluate(make_metrics(**overrides))
     assert result.verdict is Verdict.BELOW_FLOOR
     assert result.reason is reason
+
+
+def test_background_bystanders_do_not_fail_the_gate() -> None:
+    # Real photos have small faces in the background; only a *comparable*
+    # second face is an identity ambiguity.
+    result = GATE.evaluate(make_metrics(face_count=3, secondary_face_ratio=0.08))
+    assert (result.verdict, result.reason) == (Verdict.PASSED, GateReason.OK)
 
 
 def test_most_fundamental_failure_wins() -> None:
@@ -170,8 +180,25 @@ async def test_sharp_frame_with_face_passes() -> None:
     assert profile.gate_reason is GateReason.OK
     assert profile.metrics.face_count == 1
     assert profile.metrics.face_area_ratio == pytest.approx(0.25, abs=0.01)
+    assert profile.metrics.face_side == pytest.approx(320.0)
     assert profile.embedding == pytest.approx(face.embedding.tolist())
     assert profile.age == 30
+
+
+async def test_small_background_face_passes_but_comparable_one_fails() -> None:
+    primary = detected_face()
+    background = detected_face(bbox=(0.0, 0.0, 64.0, 64.0))  # a passer-by far behind
+    comparable = detected_face(bbox=(0.0, 0.0, 320.0, 320.0))  # someone right next to them
+    frame = images.encode_jpeg(noise_frame())
+
+    vision = make_vision(ScriptedFaceAnalyzer([primary, background]))
+    profile = await vision.build_face_profile(frame, face_key="f-bg", photo_ref="ref")
+    assert profile.metrics.secondary_face_ratio == pytest.approx(0.04)
+    assert profile.gate_verdict is Verdict.PASSED
+
+    vision = make_vision(ScriptedFaceAnalyzer([primary, comparable]))
+    profile = await vision.build_face_profile(frame, face_key="f-two", photo_ref="ref")
+    assert profile.gate_reason is GateReason.MULTIPLE_FACES
 
 
 async def test_programmatically_blurred_frame_fails_blurry() -> None:
@@ -206,7 +233,8 @@ async def test_face_profile_is_reused_across_sessions() -> None:
 # The gate config defaults (src/config.py) — what a prod ingest would apply.
 REAL_THRESHOLDS = GateThresholds(
     min_side=512,
-    min_face_area_ratio=0.04,
+    min_face_side=128.0,
+    max_secondary_face_ratio=0.25,
     min_blur_var=60.0,
     max_yaw=35.0,
     max_pitch=25.0,
@@ -237,7 +265,9 @@ async def test_real_photo_builds_a_passing_profile() -> None:
 
     assert profile.gate_verdict is Verdict.PASSED
     assert profile.gate_reason is GateReason.OK
-    assert profile.metrics.face_count == 1
+    # Background faces are allowed; the profile must anchor the primary one.
+    assert profile.metrics.face_count >= 1
+    assert profile.metrics.face_side >= REAL_THRESHOLDS.min_face_side
     assert len(profile.embedding) == 512
     assert profile.gender is not None
     assert profile.age is not None and 0 < profile.age < 100

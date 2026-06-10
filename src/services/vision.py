@@ -44,7 +44,7 @@ class VisionService:
         faces = await self._analyzer.analyze(image)
         primary = faces[0] if faces else None  # analyzer contract: largest first
 
-        metrics = self._measure(frame, primary, face_count=len(faces))
+        metrics = self._measure(frame, faces)
         gate = self._gate.evaluate(metrics)
 
         return FaceProfile(
@@ -58,25 +58,27 @@ class VisionService:
             photo_ref=photo_ref,
         )
 
-    def _measure(
-        self, frame: Image.Image, primary: DetectedFace | None, *, face_count: int
-    ) -> FrameMetrics:
+    def _measure(self, frame: Image.Image, faces: list[DetectedFace]) -> FrameMetrics:
+        primary = faces[0] if faces else None
+        face_area_ratio = 0.0
+        face_side = 0.0
+        secondary_face_ratio = 0.0
+        region = frame
         if primary is not None:
-            x1, y1, x2, y2 = primary.bbox
-            # Clamp before computing the ratio: detectors may overshoot the frame.
-            area = max(0.0, min(x2, frame.width) - max(x1, 0.0)) * max(
-                0.0, min(y2, frame.height) - max(y1, 0.0)
-            )
-            face_area_ratio = area / (frame.width * frame.height)
+            w, h = self._clamped_size(frame, primary)
+            face_area_ratio = (w * h) / (frame.width * frame.height)
+            face_side = min(w, h)
             region = images.crop_bbox(frame, primary.bbox, margin=0.25)
-        else:
-            face_area_ratio = 0.0
-            region = frame
+            if len(faces) > 1 and w * h > 0:
+                w2, h2 = self._clamped_size(frame, faces[1])
+                secondary_face_ratio = (w2 * h2) / (w * h)
 
         gray = images.grayscale(region)
         return FrameMetrics(
-            face_count=face_count,
+            face_count=len(faces),
             face_area_ratio=face_area_ratio,
+            face_side=face_side,
+            secondary_face_ratio=secondary_face_ratio,
             blur_var=images.laplacian_variance(gray),
             yaw=primary.yaw if primary else 0.0,
             pitch=primary.pitch if primary else 0.0,
@@ -85,3 +87,11 @@ class VisionService:
             width=frame.width,
             height=frame.height,
         )
+
+    @staticmethod
+    def _clamped_size(frame: Image.Image, face: DetectedFace) -> tuple[float, float]:
+        """Bbox width/height with the out-of-frame overshoot detectors allow cut off."""
+        x1, y1, x2, y2 = face.bbox
+        w = max(0.0, min(x2, frame.width) - max(x1, 0.0))
+        h = max(0.0, min(y2, frame.height) - max(y1, 0.0))
+        return w, h

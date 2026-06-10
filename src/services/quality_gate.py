@@ -25,7 +25,8 @@ class GateThresholds:
     """Config-supplied limits; no defaults so wiring stays explicit."""
 
     min_side: int  # min(width, height) of the frame, px
-    min_face_area_ratio: float  # face bbox area / frame area
+    min_face_side: float  # min side of the primary face bbox, px
+    max_secondary_face_ratio: float  # second-largest face area / primary face area
     min_blur_var: float  # Laplacian variance on the face crop
     max_yaw: float  # degrees, absolute
     max_pitch: float  # degrees, absolute
@@ -57,14 +58,16 @@ class QualityGate:
         t = self._t
         if m.face_count == 0:
             return GateReason.NO_FACE
-        # Any extra detection is ambiguity about *whose* identity to anchor, so
-        # one face is the rule — the detector's own confidence cut already
-        # filtered background noise.
-        if m.face_count > 1:
+        # Ambiguity about *whose* identity to anchor exists only when a second
+        # face is comparable in size to the primary — small background
+        # passers-by are a fact of real photos and must not fail the gate.
+        if m.face_count > 1 and m.secondary_face_ratio > t.max_secondary_face_ratio:
             return GateReason.MULTIPLE_FACES
         if min(m.width, m.height) < t.min_side:
             return GateReason.LOW_RESOLUTION
-        if m.face_area_ratio < t.min_face_area_ratio:
+        # Absolute crop resolution, not fraction of the frame: identity quality
+        # comes from the pixels on the face, however the shot is composed.
+        if m.face_side < t.min_face_side:
             return GateReason.FACE_TOO_SMALL
         if m.blur_var < t.min_blur_var:
             return GateReason.BLURRY

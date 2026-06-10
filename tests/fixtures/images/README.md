@@ -12,8 +12,8 @@ The InsightFace weights are a separate prerequisite for the same tests: run
 
 | file | what it must contain |
 | --- | --- |
-| `face_a.jpg` | One clear, sharp, frontal, well-lit face of person **A**. ≥ 512px on the short side, face filling a good part of the frame (≥ ~10% by area). This is the "passes the gate" anchor. |
-| `face_b.jpg` | Same requirements, but a **different person** — used to assert two identities embed apart. |
+| `face_a.jpg` | One clear, sharp, well-lit, **near-frontal** face of person **A** (head turned ≤ ~35° — a three-quarter portrait fails the pose check). Frame ≥ 512px on the short side, the face bbox ≥ ~128px. Small faces in the background are fine; another face of comparable size is not. This is the "passes the gate" anchor. |
+| `face_b.jpg` | A **different person** — used to assert two identities embed apart. Only needs a detectable face; the gate is not applied to it. |
 
 Any selfie-quality photo works. JPEG or anything pillow decodes; the names
 must match exactly.

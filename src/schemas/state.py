@@ -34,6 +34,14 @@ class FrameMetrics(StrictModel):
 
     face_count: int
     face_area_ratio: float  # face bbox area / frame area
+    # min(w, h) of the primary face bbox, px. The gate thresholds this, not the
+    # area ratio: identity quality is about absolute crop resolution — a 450px
+    # face in a 2048px frame is a great anchor at only ~3% of the area.
+    face_side: float = 0.0
+    # Second-largest bbox area / primary bbox area; 0.0 with fewer than two
+    # faces. Distinguishes a comparable second face (ambiguous identity) from
+    # background passers-by, which are normal and must not fail the gate.
+    secondary_face_ratio: float = 0.0
     blur_var: float  # variance of the Laplacian; higher = sharper
     yaw: float
     pitch: float

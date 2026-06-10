@@ -62,7 +62,12 @@ class Settings(BaseSettings):
     # Thresholds on FrameMetrics; deps assembles them into a GateThresholds for
     # services/quality_gate. Defaults are starting points, expected to be tuned.
     gate_min_side: int = 512  # min(width, height) of the frame, px
-    gate_min_face_area_ratio: float = 0.04  # face bbox area / frame area
+    # Absolute, not a frame fraction: the recognition model aligns to 112px, so
+    # what matters is pixels on the face, however the shot is composed.
+    gate_min_face_side: float = 128.0  # min side of the primary face bbox, px
+    # A second face only fails the gate when comparable to the primary;
+    # background passers-by sit far below this.
+    gate_max_secondary_face_ratio: float = 0.25  # secondary bbox area / primary bbox area
     gate_min_blur_var: float = 60.0  # Laplacian variance on the face crop
     gate_max_yaw: float = 35.0  # degrees, absolute
     gate_max_pitch: float = 25.0  # degrees, absolute
