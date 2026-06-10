@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     port: int = 8000
     reload: bool = False  # uvicorn autoreload, dev only
 
+    # --- Connectors ---
+    # True → the model-shaped ports (generator, face engine, slot filler) are
+    # wired to deterministic in-process fakes: the full pipeline runs with no
+    # OpenRouter key, no InsightFace weights and no money spent. Store, bus and
+    # object storage still follow their own settings (redis_url / object_storage),
+    # so fake mode composes with real Redis for FSM/persistence testing.
+    fake_connectors: bool = False
+
     # --- Logging ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_json: bool = False  # structured JSON in prod, pretty console in dev

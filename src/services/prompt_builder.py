@@ -68,6 +68,15 @@ _INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
+class FreeFormRejectedError(ValueError):
+    """Free-form slot text read as a prompt injection.
+
+    Its own type (not a bare ``ValueError``) because the orchestration reacts
+    differently: a vocabulary violation is a programming/filler bug and crashes
+    the run, while this error means "re-ask the user for a scene description".
+    """
+
+
 class BuiltPrompt(NamedTuple):
     """The final prompt text, its hash, and the preset's generation knobs.
 
@@ -130,7 +139,7 @@ def _reject_injection(preset: Preset, name: str, value: str) -> None:
     lowered = value.lower()
     for pattern in _INJECTION_PATTERNS:
         if pattern.search(lowered):
-            raise ValueError(
+            raise FreeFormRejectedError(
                 f"preset {preset.id!r}: slot {name!r} free-form text rejected — it reads "
                 f"as an instruction to alter identity or override the prompt; "
                 f"describe only the scene"

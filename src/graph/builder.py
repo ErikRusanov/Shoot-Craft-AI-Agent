@@ -1,39 +1,72 @@
-"""Graph assembly — the linear walking-skeleton pipeline.
+"""Graph assembly — the session FSM.
 
-face_check → ask (interrupt) → plan → generate → finalize
+::
+
+    analyze → quality_gate ─→ ask ⇄ match_fill → plan → approve → generate → done
+                    │           │        │                  │          │
+                    └───────────┴────────┴──── fail ────────┘         END
+
+``ask`` and ``approve`` pause on ``interrupt()``; ``match_fill`` loops back to
+``ask`` when a free-form answer is rejected. ``generate`` routes to ``done``
+on a delivered result and straight to END on a loop failure (the loop already
+published its own terminal event).
 
 The checkpointer is injected so a resume can happen in a *different* graph
-instance than the one that interrupted — that is exactly the crash-recovery
-property the skeleton must prove. In-memory for now; Redis lands later behind
-the same `BaseCheckpointSaver` seam.
+instance than the one that interrupted — the crash-recovery property the
+whole design hangs on. In-memory in fake/dev wiring, Redis in prod (see
+api/deps.py).
 """
 
 from __future__ import annotations
 
-from itertools import pairwise
+from collections.abc import Callable
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from graph.nodes import make_nodes
+from graph.nodes import GraphServices, make_nodes
 from graph.state import GraphState
-from protocols.event_bus import EventBus
 
-PIPELINE = ("face_check", "ask", "plan", "generate", "finalize")
+
+def _route_failure(next_node: str) -> Callable[[GraphState], str]:
+    def route(state: GraphState) -> str:
+        return "fail" if state.get("failure") else next_node
+
+    return route
+
+
+def _route_match_fill(state: GraphState) -> str:
+    if state.get("failure"):
+        return "fail"
+    if state.get("reask_reason"):
+        return "ask"
+    return "plan"
+
+
+def _route_generate(state: GraphState) -> str:
+    # On a loop failure the terminal `failed` event is already on the stream —
+    # ending the run here keeps exactly one terminal event per session.
+    return "done" if state.get("delivered") else END
 
 
 def build_graph(
-    bus: EventBus, *, checkpointer: BaseCheckpointSaver[str]
+    services: GraphServices, *, checkpointer: BaseCheckpointSaver[str]
 ) -> CompiledStateGraph[GraphState]:
-    """Compile the skeleton pipeline against a bus and a checkpointer."""
+    """Compile the session FSM against the services and a checkpointer."""
     graph: StateGraph[GraphState] = StateGraph(GraphState)
-    for name, fn in make_nodes(bus).items():
+    for name, fn in make_nodes(services).items():
         graph.add_node(name, fn)
 
-    graph.add_edge(START, PIPELINE[0])
-    for prev, nxt in pairwise(PIPELINE):
-        graph.add_edge(prev, nxt)
-    graph.add_edge(PIPELINE[-1], END)
+    graph.add_edge(START, "analyze")
+    graph.add_edge("analyze", "quality_gate")
+    graph.add_conditional_edges("quality_gate", _route_failure("ask"), ["fail", "ask"])
+    graph.add_conditional_edges("ask", _route_failure("match_fill"), ["fail", "match_fill"])
+    graph.add_conditional_edges("match_fill", _route_match_fill, ["fail", "ask", "plan"])
+    graph.add_edge("plan", "approve")
+    graph.add_conditional_edges("approve", _route_failure("generate"), ["fail", "generate"])
+    graph.add_conditional_edges("generate", _route_generate, ["done", END])
+    graph.add_edge("done", END)
+    graph.add_edge("fail", END)
 
     return graph.compile(checkpointer=checkpointer)

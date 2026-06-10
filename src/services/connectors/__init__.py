@@ -9,6 +9,7 @@ runtime failover between backends.
 
 from __future__ import annotations
 
+from services.connectors.fake import FakeFaceEngine, FakeImageGenerator
 from services.connectors.insightface_embedder import InsightFaceEmbedder
 from services.connectors.local_storage import LocalObjectStorage
 from services.connectors.memory_store import InMemoryEventBus, InMemoryStateStore
@@ -23,6 +24,8 @@ from services.connectors.redis_store import RedisStateStore
 from services.connectors.s3_storage import S3ObjectStorage
 
 __all__ = [
+    "FakeFaceEngine",
+    "FakeImageGenerator",
     "InMemoryEventBus",
     "InMemoryStateStore",
     "InsightFaceEmbedder",

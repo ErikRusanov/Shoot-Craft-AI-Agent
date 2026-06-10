@@ -22,6 +22,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # Checkpointer indices and similar async-only init happen here — the
+        # factory itself stays sync for uvicorn's `factory=True`.
+        await container.astart()
         yield
         # Don't leave graph runs or connector clients dangling past the server.
         await container.aclose()

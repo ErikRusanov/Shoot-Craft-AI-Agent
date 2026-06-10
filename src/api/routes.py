@@ -1,9 +1,10 @@
 """HTTP contract — the endpoints the business service drives the core through.
 
 Mutations return 202 with a lean `SessionAck`: the actual work runs in the
-background and narrates itself over the event stream. Skeleton scope: no
-idempotency replay and no session-existence checks yet — those arrive with the
-StateStore-backed services.
+background and narrates itself over the event stream. Step-9 scope: the FSM and
+its persistence are real, but the API surface is still thin — idempotency
+replay, session-existence checks and the ingest endpoint land with API
+hardening.
 """
 
 from __future__ import annotations
@@ -15,7 +16,13 @@ from sse_starlette import EventSourceResponse
 
 from api.deps import Container
 from api.sse import session_event_stream
-from schemas import FsmState, InputAnswerRequest, SessionAck, StartSessionRequest
+from schemas import (
+    ApproveRequest,
+    FsmState,
+    InputAnswerRequest,
+    SessionAck,
+    StartSessionRequest,
+)
 
 router = APIRouter(prefix="/v1/sessions")
 
@@ -32,7 +39,13 @@ ContainerDep = Annotated[Container, Depends(get_container)]
 async def start_session(
     session_key: str, body: StartSessionRequest, container: ContainerDep
 ) -> SessionAck:
-    container.runner.start(session_key, face_key=body.face_key)
+    container.runner.start(
+        session_key,
+        face_key=body.face_key,
+        use_case=body.use_case,
+        gender=body.gender,
+        budget_limit=body.budget_limit,
+    )
     return SessionAck(session_key=session_key, fsm_state=FsmState.CREATED)
 
 
@@ -43,9 +56,20 @@ async def submit_input(
     if body.session_key != session_key:
         raise HTTPException(status_code=409, detail="session_key mismatch")
     container.runner.resume(session_key, body.value)
-    # The graph is heading back into planning; the durable FSM state lands with
-    # the StateStore-backed services.
     return SessionAck(session_key=session_key, fsm_state=FsmState.PLANNING)
+
+
+@router.post("/{session_key}/approve", status_code=202)
+async def approve_plan(
+    session_key: str, body: ApproveRequest, container: ContainerDep
+) -> SessionAck:
+    if body.session_key != session_key:
+        raise HTTPException(status_code=409, detail="session_key mismatch")
+    container.runner.resume(
+        session_key, {"approved": body.approved, "composition_id": body.composition_id}
+    )
+    next_state = FsmState.GENERATING if body.approved else FsmState.FAILED
+    return SessionAck(session_key=session_key, fsm_state=next_state)
 
 
 @router.get("/{session_key}/events")

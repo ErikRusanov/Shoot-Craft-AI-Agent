@@ -16,12 +16,40 @@ the numbers are only for observability.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from PIL import Image
 
 from protocols import DetectedFace, FaceAnalyzer
 from schemas import FaceProfile, FrameMetrics
 from services.quality_gate import QualityGate
 from utils import images
+
+# Margin (fraction of the bbox) around the stored reference crop: enough
+# context for the generator to read the face, still face-dominated.
+_CROP_MARGIN = 0.25
+
+
+def photo_ref(face_key: str) -> str:
+    """Object-storage key convention for the input photo behind ``face_key``."""
+    return f"photos/{face_key}"
+
+
+def face_crop_ref(face_key: str) -> str:
+    """Object-storage key convention for the tight face crop behind ``face_key``."""
+    return f"faces/{face_key}/crop"
+
+
+class FaceIngest(NamedTuple):
+    """One ingest pass: the profile plus the tight crop of the primary face.
+
+    The crop is produced here because only ingest still holds the detection
+    bbox; the generation loop later attaches it to retries to strengthen the
+    identity reference. ``None`` when no face was detected.
+    """
+
+    profile: FaceProfile
+    face_crop: bytes | None
 
 
 class VisionService:
@@ -31,10 +59,8 @@ class VisionService:
         self._analyzer = analyzer
         self._gate = gate
 
-    async def build_face_profile(
-        self, image: bytes, *, face_key: str, photo_ref: str
-    ) -> FaceProfile:
-        """Analyze ``image`` and return the profile to store under ``face_key``.
+    async def ingest(self, image: bytes, *, face_key: str, photo_ref: str) -> FaceIngest:
+        """Analyze ``image``: the profile to store under ``face_key`` plus the face crop.
 
         Always returns a profile — a failed gate is encoded in
         ``gate_verdict`` / ``gate_reason``, not raised — so the caller can tell
@@ -47,7 +73,7 @@ class VisionService:
         metrics = self._measure(frame, faces)
         gate = self._gate.evaluate(metrics)
 
-        return FaceProfile(
+        profile = FaceProfile(
             face_key=face_key,
             embedding=primary.embedding.tolist() if primary else [],
             gate_verdict=gate.verdict,
@@ -56,6 +82,25 @@ class VisionService:
             gender=primary.gender if primary else None,
             photo_ref=photo_ref,
         )
+        return FaceIngest(profile=profile, face_crop=self._crop(frame, primary))
+
+    async def build_face_profile(
+        self, image: bytes, *, face_key: str, photo_ref: str
+    ) -> FaceProfile:
+        """The profile alone — see :meth:`ingest` for the full result."""
+        ingest = await self.ingest(image, face_key=face_key, photo_ref=photo_ref)
+        return ingest.profile
+
+    @staticmethod
+    def _crop(frame: Image.Image, primary: DetectedFace | None) -> bytes | None:
+        if primary is None:
+            return None
+        try:
+            return images.encode_jpeg(images.crop_bbox(frame, primary.bbox, margin=_CROP_MARGIN))
+        except ValueError:
+            # A degenerate bbox (fully out of frame) — no crop, never a crash:
+            # the crop only strengthens retries, the pipeline runs without it.
+            return None
 
     def _measure(self, frame: Image.Image, faces: list[DetectedFace]) -> FrameMetrics:
         primary = faces[0] if faces else None
