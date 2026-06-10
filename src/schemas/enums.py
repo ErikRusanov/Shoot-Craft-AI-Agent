@@ -35,8 +35,10 @@ class Verdict(StrEnum):
     ``identity_floor``.
 
     Used twice with the same shape: the input-photo quality gate and the
-    per-iteration identity check. ``soft`` is the band between the floor and the
-    target — shippable as keep-best when retries run out, but not a clean pass.
+    per-iteration identity check. ``soft`` is the band between the floor and
+    the target. For a generated frame that means shippable as keep-best when
+    retries run out; for an input photo it means usable *with the user's
+    confirmation* — quality is not guaranteed, but trying is allowed.
     """
 
     PASSED = "passed"
@@ -72,10 +74,12 @@ class Gender(StrEnum):
 class GateReason(StrEnum):
     """Why the input-photo quality gate produced its verdict.
 
-    ``ok`` accompanies a pass; the rest explain a soft/below-floor outcome so the
-    business service can tell the user what to re-shoot. Every reason is about
-    how well the face is *rendered* (or whose face to anchor) — composition
-    choices like pose or expression are deliberately not gate reasons.
+    ``ok`` accompanies a clean pass; the rest explain a soft/below-floor
+    outcome so the business service can tell the user what to re-shoot or what
+    risk they are confirming. Rendering reasons (resolution, sharpness,
+    exposure) can reject; ``extreme_pose`` is the one composition signal and
+    it only ever marks the ``soft`` band — a strong profile weakens the
+    identity anchor, so the user is warned, never refused.
     """
 
     OK = "ok"
@@ -86,3 +90,4 @@ class GateReason(StrEnum):
     BLURRY = "blurry"
     OCCLUDED = "occluded"
     POOR_LIGHTING = "poor_lighting"
+    EXTREME_POSE = "extreme_pose"

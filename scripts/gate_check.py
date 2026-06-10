@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from config import get_settings
+from schemas import GateReason, Verdict
 from services.connectors.insightface_embedder import InsightFaceEmbedder
 from services.quality_gate import GateThresholds, QualityGate
 from services.vision import VisionService
@@ -26,11 +27,16 @@ def gate_from_settings() -> tuple[QualityGate, GateThresholds]:
     s = get_settings()
     t = GateThresholds(
         min_side=s.gate_min_side,
-        min_face_side=s.gate_min_face_side,
         max_secondary_face_ratio=s.gate_max_secondary_face_ratio,
+        min_face_side=s.gate_min_face_side,
+        floor_face_side=s.gate_floor_face_side,
         min_blur_var=s.gate_min_blur_var,
+        floor_blur_var=s.gate_floor_blur_var,
         min_brightness=s.gate_min_brightness,
         max_brightness=s.gate_max_brightness,
+        floor_min_brightness=s.gate_floor_min_brightness,
+        floor_max_brightness=s.gate_floor_max_brightness,
+        risk_max_abs_yaw=s.gate_risk_max_abs_yaw,
     )
     return QualityGate(t), t
 
@@ -48,16 +54,23 @@ async def main(paths: list[Path]) -> None:
     )
 
     print(
-        f"thresholds: frame>={t.min_side}px face>={t.min_face_side:.0f}px "
+        f"pass: frame>={t.min_side}px face>={t.min_face_side:.0f}px "
         f"secondary<={t.max_secondary_face_ratio} blur>={t.min_blur_var} "
-        f"brightness {t.min_brightness:.0f}..{t.max_brightness:.0f}\n"
+        f"brightness {t.min_brightness:.0f}..{t.max_brightness:.0f} "
+        f"|yaw|<={t.risk_max_abs_yaw:.0f}\n"
+        f"hard floors: face>={t.floor_face_side:.0f}px blur>={t.floor_blur_var} "
+        f"brightness {t.floor_min_brightness:.0f}..{t.floor_max_brightness:.0f} "
+        f"(between floor and pass = RISK: ask the user)\n"
     )
+    marks = {Verdict.PASSED: "PASS", Verdict.SOFT: "RISK", Verdict.BELOW_FLOOR: "FAIL"}
     for path in paths:
         p = await vision.build_face_profile(
             path.read_bytes(), face_key=path.stem, photo_ref=str(path)
         )
         m = p.metrics
-        mark = "PASS" if p.gate_reason.value == "ok" else f"FAIL: {p.gate_reason.value}"
+        mark = marks[p.gate_verdict]
+        if p.gate_reason is not GateReason.OK:
+            mark = f"{mark}: {p.gate_reason.value}"
         print(
             f"{path.name:30s} {mark:22s} "
             f"faces={m.face_count} frame={m.width}x{m.height} face_side={m.face_side:.0f} "

@@ -60,21 +60,32 @@ class Settings(BaseSettings):
 
     # --- Input-photo quality gate ---
     # Thresholds on FrameMetrics; deps assembles them into a GateThresholds for
-    # services/quality_gate. Defaults are starting points, expected to be tuned.
-    gate_min_side: int = 512  # min(width, height) of the frame, px
+    # services/quality_gate. GATE_MIN_* / GATE_MAX_* are the clean-pass levels;
+    # GATE_FLOOR_* are the hard floors — between the two the verdict is SOFT
+    # (usable with the user's explicit confirmation, no quality guarantee).
+    # Bands calibrated on 22 labeled real photos; revisit once the generation
+    # loop shows which anchors actually produce bad output.
+    gate_min_side: int = 512  # min(width, height) of the frame, px — hard
+    # A second face only fails the gate when comparable to the primary;
+    # background passers-by sit far below this. Hard: confirmation cannot
+    # resolve whose identity to anchor.
+    gate_max_secondary_face_ratio: float = 0.25  # secondary bbox area / primary bbox area
     # Absolute, not a frame fraction: the recognition model aligns to 112px, so
     # what matters is pixels on the face, however the shot is composed.
     gate_min_face_side: float = 128.0  # min side of the primary face bbox, px
-    # A second face only fails the gate when comparable to the primary;
-    # background passers-by sit far below this.
-    gate_max_secondary_face_ratio: float = 0.25  # secondary bbox area / primary bbox area
-    # On the *denoised* face crop (see FrameMetrics.blur_var). Calibrated on
-    # 22 labeled real photos: usable faces measure >= 65, soft/noisy/heavily
-    # retouched ones <= 53. The bands sit close — revisit once the generation
-    # loop shows which anchors actually produce bad output.
+    gate_floor_face_side: float = 96.0
+    # On the *denoised* face crop (see FrameMetrics.blur_var). Clean faces
+    # measure >= 65; shadowed/retouched-but-arguably-usable ones 11..53; only
+    # outright mush (2-and-below territory) is hopeless, hence the deep floor.
     gate_min_blur_var: float = 60.0
+    gate_floor_blur_var: float = 8.0
     gate_min_brightness: float = 50.0  # mean luma 0..255 on the face crop
     gate_max_brightness: float = 230.0
+    gate_floor_min_brightness: float = 25.0
+    gate_floor_max_brightness: float = 245.0
+    # Risk-only flag, never a rejection: an extreme profile is a weak identity
+    # anchor, so the user confirms before budget is spent on it.
+    gate_risk_max_abs_yaw: float = 60.0
 
     # --- Object storage ---
     object_storage: Literal["s3", "local"] = "local"

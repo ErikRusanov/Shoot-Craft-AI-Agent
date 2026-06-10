@@ -33,11 +33,16 @@ from utils import images
 
 THRESHOLDS = GateThresholds(
     min_side=256,
-    min_face_side=128.0,
     max_secondary_face_ratio=0.25,
+    min_face_side=128.0,
+    floor_face_side=96.0,
     min_blur_var=50.0,
+    floor_blur_var=8.0,
     min_brightness=40.0,
     max_brightness=230.0,
+    floor_min_brightness=25.0,
+    floor_max_brightness=245.0,
+    risk_max_abs_yaw=60.0,
 )
 GATE = QualityGate(THRESHOLDS)
 
@@ -113,22 +118,50 @@ def test_good_metrics_pass() -> None:
         ({"face_count": 2, "secondary_face_ratio": 0.8}, GateReason.MULTIPLE_FACES),
         ({"width": 200, "height": 640}, GateReason.LOW_RESOLUTION),
         ({"face_side": 64.0}, GateReason.FACE_TOO_SMALL),
-        ({"blur_var": 10.0}, GateReason.BLURRY),
+        ({"blur_var": 2.0}, GateReason.BLURRY),
         ({"brightness": 15.0}, GateReason.POOR_LIGHTING),
         ({"brightness": 250.0}, GateReason.POOR_LIGHTING),
     ],
 )
-def test_each_threshold_names_its_reason(overrides: dict[str, Any], reason: GateReason) -> None:
+def test_below_floor_rejects_and_names_its_reason(
+    overrides: dict[str, Any], reason: GateReason
+) -> None:
     result = GATE.evaluate(make_metrics(**overrides))
     assert result.verdict is Verdict.BELOW_FLOOR
     assert result.reason is reason
 
 
-def test_pose_is_composition_not_a_quality_problem() -> None:
-    # A turned/tilted head is the user's photo, not a rendering defect — the
-    # gate judges only how well the face is rendered.
-    result = GATE.evaluate(make_metrics(yaw=80.0, pitch=-45.0, roll=50.0))
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"face_side": 110.0}, GateReason.FACE_TOO_SMALL),
+        ({"blur_var": 30.0}, GateReason.BLURRY),
+        ({"brightness": 30.0}, GateReason.POOR_LIGHTING),
+        ({"brightness": 240.0}, GateReason.POOR_LIGHTING),
+        ({"yaw": -75.0}, GateReason.EXTREME_POSE),
+    ],
+)
+def test_between_floor_and_pass_is_soft_with_its_reason(
+    overrides: dict[str, Any], reason: GateReason
+) -> None:
+    # The user can confirm the risk and proceed — not a clean pass, not a
+    # rejection.
+    result = GATE.evaluate(make_metrics(**overrides))
+    assert result.verdict is Verdict.SOFT
+    assert result.reason is reason
+
+
+def test_moderate_pose_passes_clean() -> None:
+    # A turned/tilted head is the user's photo, not a rendering defect.
+    result = GATE.evaluate(make_metrics(yaw=40.0, pitch=-20.0, roll=25.0))
     assert (result.verdict, result.reason) == (Verdict.PASSED, GateReason.OK)
+
+
+def test_extreme_pose_is_a_risk_never_a_rejection() -> None:
+    # An extreme profile weakens the identity anchor, so the user is warned and
+    # asked — but composition can never produce BELOW_FLOOR.
+    result = GATE.evaluate(make_metrics(yaw=85.0))
+    assert (result.verdict, result.reason) == (Verdict.SOFT, GateReason.EXTREME_POSE)
 
 
 def test_background_bystanders_do_not_fail_the_gate() -> None:
@@ -234,13 +267,15 @@ async def test_programmatically_blurred_frame_fails_blurry() -> None:
     assert profile.gate_reason is GateReason.BLURRY
 
 
-async def test_grainy_soft_frame_fails_blurry() -> None:
+async def test_grainy_soft_frame_is_flagged_blurry_at_risk() -> None:
     # PNG, not JPEG: lossy encoding would smear the very grain this case is about.
+    # Grain over soft content lands in the risk band: the user may confirm and
+    # try, but it must never read as a clean pass.
     buf = io.BytesIO()
     grainy_soft_frame().save(buf, format="PNG")
     vision = make_vision(ScriptedFaceAnalyzer([detected_face()]))
     profile = await vision.build_face_profile(buf.getvalue(), face_key="f-grain", photo_ref="ref")
-    assert profile.gate_verdict is Verdict.BELOW_FLOOR
+    assert profile.gate_verdict is Verdict.SOFT
     assert profile.gate_reason is GateReason.BLURRY
 
 
@@ -266,11 +301,16 @@ async def test_face_profile_is_reused_across_sessions() -> None:
 # The gate config defaults (src/config.py) — what a prod ingest would apply.
 REAL_THRESHOLDS = GateThresholds(
     min_side=512,
-    min_face_side=128.0,
     max_secondary_face_ratio=0.25,
+    min_face_side=128.0,
+    floor_face_side=96.0,
     min_blur_var=60.0,
+    floor_blur_var=8.0,
     min_brightness=50.0,
     max_brightness=230.0,
+    floor_min_brightness=25.0,
+    floor_max_brightness=245.0,
+    risk_max_abs_yaw=60.0,
 )
 
 
@@ -313,13 +353,15 @@ async def test_real_turned_face_passes_the_gate() -> None:
     assert abs(profile.metrics.yaw) > 25  # the premise: the head really is turned
 
 
-async def test_real_noisy_dim_photo_fails_the_gate() -> None:
+async def test_real_noisy_dim_photo_is_flagged_blurry_at_risk() -> None:
     # The canonical "bad rendering" fixture: high-ISO grain over a soft face.
+    # Soft enough to demand the user's confirmation, not hopeless enough to
+    # refuse outright — and never a clean pass.
     vision = _real_vision()
     data = fixtures.require_fixture(fixtures.IMAGES_DIR / "bad_qual.png")
     profile = await vision.build_face_profile(data, face_key="fixture-bad", photo_ref="ref-bad")
 
-    assert profile.gate_verdict is Verdict.BELOW_FLOOR
+    assert profile.gate_verdict is Verdict.SOFT
     assert profile.gate_reason is GateReason.BLURRY
 
 
@@ -350,5 +392,7 @@ async def test_real_photo_blurred_fails_the_gate() -> None:
         images.encode_jpeg(blurred), face_key="fixture-a-blur", photo_ref="ref-a-blur"
     )
 
-    assert profile.gate_verdict is Verdict.BELOW_FLOOR
+    # Where it lands inside the blur bands depends on the source photo; the
+    # invariant is that a defocused face never reads as a clean pass.
+    assert profile.gate_verdict is not Verdict.PASSED
     assert profile.gate_reason is GateReason.BLURRY
