@@ -7,6 +7,7 @@ Single source of runtime config, loaded from the environment (and an optional
 Secrets and connection details only — no contract lives here (that is `schemas/`).
 """
 
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -75,6 +76,14 @@ class Settings(BaseSettings):
     # budget_limit is supplied per session by the business service; this is only a
     # hard ceiling guarding against a runaway loop.
     max_iterations: int = 8
+
+    # --- Cost estimation ---
+    # Price of one paid generation in abstract units; the business service maps
+    # units to real money. Used only for the plan's CostEstimate. Decimal, not
+    # float — it is price-like, the arithmetic must stay exact.
+    generation_unit_price: Decimal = Decimal("1.0")
+    # Fallback expected paid generations when a preset ships no convergence stats.
+    default_expected_generations: int = 3
 
     @model_validator(mode="after")
     def _check_path_preset(self) -> Settings:

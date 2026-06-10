@@ -59,6 +59,9 @@ thresholds:
   identity_floor: 0.50  # placeholder
   K_max_retries: 3
 
+convergence:
+  expected_generations: 2  # placeholder; measure on real pipeline output
+
 compositions:
   - id: neutral_grey
     label: "Neutral — light-grey backdrop"

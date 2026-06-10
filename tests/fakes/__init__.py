@@ -9,12 +9,15 @@ from __future__ import annotations
 
 from tests.fakes.embedder import DeterministicEmbedder
 from tests.fakes.generator import FixedImageGenerator, GenerateCall
+from tests.fakes.slot_filler import FillCall, FixedSlotFiller
 from tests.fakes.storage import InMemoryObjectStorage
 from tests.fakes.store import InMemoryEventBus, InMemoryStateStore
 
 __all__ = [
     "DeterministicEmbedder",
+    "FillCall",
     "FixedImageGenerator",
+    "FixedSlotFiller",
     "GenerateCall",
     "InMemoryEventBus",
     "InMemoryObjectStorage",

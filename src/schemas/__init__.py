@@ -37,6 +37,7 @@ from schemas.events import (
 from schemas.presets import (
     AppliesTo,
     Composition,
+    ConvergenceProfile,
     Generation,
     Preset,
     Slot,
@@ -60,6 +61,7 @@ __all__ = [
     "BestResult",
     "Composition",
     "CompositionChoice",
+    "ConvergenceProfile",
     "ConvergenceStats",
     "CostEstimate",
     "CostEvent",

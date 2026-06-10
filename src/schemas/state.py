@@ -16,6 +16,7 @@ what makes a delivered result reproducible after the preset library updates.
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
 from pydantic import Field
 
@@ -116,10 +117,15 @@ class CostEstimate(StrictModel):
 
     ``budget_limit`` is the hard ceiling supplied per session by the business
     service; ``generations`` is what the plan expects to spend under it.
+    ``unit_price`` / ``total_cost`` are in abstract config units — mapping them
+    to user-facing money is the business service's job, not the core's — but
+    they are still price-like, so ``Decimal`` keeps the arithmetic exact.
     """
 
     generations: int
     budget_limit: int
+    unit_price: Decimal = Decimal("0")
+    total_cost: Decimal = Decimal("0")
     note: str | None = None
 
 

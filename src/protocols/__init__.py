@@ -11,6 +11,7 @@ from protocols.embedder import Embedder
 from protocols.event_bus import EventBus, StreamedEvent
 from protocols.generator import GeneratedImage, ImageGenerator
 from protocols.object_storage import ObjectStorage
+from protocols.slot_filler import SlotFill, SlotFiller
 from protocols.state_store import StateStore
 
 __all__ = [
@@ -19,6 +20,8 @@ __all__ = [
     "GeneratedImage",
     "ImageGenerator",
     "ObjectStorage",
+    "SlotFill",
+    "SlotFiller",
     "StateStore",
     "StreamedEvent",
 ]
