@@ -36,11 +36,16 @@ class ImageGenerator(Protocol):
         prompt: str,
         params: Generation,
         reference_images: Sequence[bytes],
+        face_crop: bytes | None = None,
     ) -> GeneratedImage:
         """Return ``(image_bytes, provider_request_id)`` for one attempt.
 
         ``reference_images`` holds the encoded reference photo(s) the edit is
-        conditioned on; it is expected to be non-empty. ``params`` are the
-        frozen preset generation knobs — the caller never invents its own.
+        conditioned on; it is expected to be non-empty. ``face_crop`` is the
+        tight crop of the anchor face, sent as its own part at the preset's
+        ``face_media_resolution`` so identity is read at full detail — explicit
+        here rather than smuggled into ``reference_images`` by position.
+        ``params`` are the frozen preset generation knobs — the caller never
+        invents its own.
         """
         ...

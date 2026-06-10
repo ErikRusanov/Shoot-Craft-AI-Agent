@@ -219,3 +219,6 @@ __marimo__/
 
 # InsightFace model weights (downloaded via `make models`, see INSIGHTFACE_ROOT)
 .models/
+
+# Live-smoke artifacts (tests/smoke) — generated images and slot fills for eyeballing
+.smoke/

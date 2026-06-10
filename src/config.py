@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     generation_model: str = "google/gemini-3.1-flash-image-preview"
     openrouter_timeout_seconds: float = 120.0
+    # Transient-only (network/429/5xx) attempts; a delivered image is never
+    # retried, so this can be generous without ever double-paying.
+    openrouter_retry_attempts: int = 4
+    # Cheap GA text model for the LLM slot filler (structured output, $0.25/M
+    # in as of 2026-06); falls back to DefaultSlotFiller on any misbehavior.
+    slot_filler_model: str = "google/gemini-3.1-flash-lite"
 
     # --- Face check (CV, not LLM) ---
     insightface_model: str = "buffalo_l"

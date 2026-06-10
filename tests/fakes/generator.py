@@ -36,6 +36,7 @@ class GenerateCall:
     prompt: str
     params: Generation
     reference_count: int
+    face_crop: bytes | None = None
 
 
 class FixedImageGenerator:
@@ -51,7 +52,8 @@ class FixedImageGenerator:
         prompt: str,
         params: Generation,
         reference_images: Sequence[bytes],
+        face_crop: bytes | None = None,
     ) -> GeneratedImage:
-        self.calls.append(GenerateCall(prompt, params, len(reference_images)))
+        self.calls.append(GenerateCall(prompt, params, len(reference_images), face_crop))
         rid = "fake-" + hashlib.sha256(prompt.encode()).hexdigest()[:16]
         return GeneratedImage(self.image, rid)

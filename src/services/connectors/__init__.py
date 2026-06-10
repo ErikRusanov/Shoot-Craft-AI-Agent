@@ -12,6 +12,12 @@ from __future__ import annotations
 from services.connectors.insightface_embedder import InsightFaceEmbedder
 from services.connectors.local_storage import LocalObjectStorage
 from services.connectors.memory_store import InMemoryEventBus, InMemoryStateStore
+from services.connectors.openrouter_client import OpenRouterClient
+from services.connectors.openrouter_generator import (
+    NoImageGeneratedError,
+    OpenRouterImageGenerator,
+)
+from services.connectors.openrouter_slot_filler import OpenRouterSlotFiller
 from services.connectors.redis_event_bus import RedisEventBus
 from services.connectors.redis_store import RedisStateStore
 from services.connectors.s3_storage import S3ObjectStorage
@@ -21,6 +27,10 @@ __all__ = [
     "InMemoryStateStore",
     "InsightFaceEmbedder",
     "LocalObjectStorage",
+    "NoImageGeneratedError",
+    "OpenRouterClient",
+    "OpenRouterImageGenerator",
+    "OpenRouterSlotFiller",
     "RedisEventBus",
     "RedisStateStore",
     "S3ObjectStorage",
