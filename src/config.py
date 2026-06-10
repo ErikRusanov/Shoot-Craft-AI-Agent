@@ -28,17 +28,15 @@ class Settings(BaseSettings):
     port: int = 8000
     reload: bool = False  # uvicorn autoreload, dev only
 
-    # --- Connector wiring (DI) ---
-    # 'fake' binds the in-memory test doubles (walking skeleton / local dev);
-    # 'real' will bind Redis/OpenRouter/InsightFace/S3 once those connectors land.
-    connectors: Literal["fake", "real"] = "fake"
-
     # --- Logging ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_json: bool = False  # structured JSON in prod, pretty console in dev
 
     # --- Redis (state store + event bus) ---
-    redis_url: str = "redis://localhost:6379/0"
+    # Set → Redis connectors; unset → in-memory. Decided once at process start,
+    # never failed-over at runtime: losing Redis mid-flight is an error, not a
+    # silent downgrade to state that dies with the process.
+    redis_url: str | None = None  # e.g. redis://localhost:6379/0
     # Biometrics are transient — face profiles expire fast; sessions live longer.
     face_ttl_seconds: int = 60 * 60  # 1h
     session_ttl_seconds: int = 24 * 60 * 60  # 24h

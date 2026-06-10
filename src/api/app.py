@@ -23,8 +23,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
-        # Don't leave graph runs dangling past the server.
-        await container.runner.aclose()
+        # Don't leave graph runs or connector clients dangling past the server.
+        await container.aclose()
 
     app = FastAPI(title="photocore", lifespan=lifespan)
     app.state.container = container

@@ -1,30 +1,21 @@
 """Contract: :class:`~protocols.event_bus.EventBus`.
 
 Pins ordering, ids, ``Last-Event-ID`` reconnect semantics and live following.
-The bus must round-trip events through the wire form, so an event read back is a
-fully-validated :class:`~schemas.events.Event`, not whatever object was published.
+Ids are opaque — the contract is that tail surfaces the same ids publish
+returned, in order; their shape (counters, Redis stream ids) is the backend's
+business. The bus must round-trip events through the wire form, so an event
+read back is a fully-validated :class:`~schemas.events.Event`, not whatever
+object was published. The ``bus`` fixture (tests/conftest.py) parametrizes
+every test over all implementations: in-memory and Redis.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
-
-import pytest
+from collections.abc import AsyncIterator
 
 from protocols import EventBus, StreamedEvent
 from schemas import DoneEvent, FsmState, StageEvent
-from tests.fakes import InMemoryEventBus
-
-BUS_FACTORIES = [
-    pytest.param(InMemoryEventBus, id="memory"),
-]
-
-
-@pytest.fixture(params=BUS_FACTORIES)
-def bus(request: pytest.FixtureRequest) -> EventBus:
-    factory: Callable[[], EventBus] = request.param
-    return factory()
 
 
 async def _take(it: AsyncIterator[StreamedEvent], n: int) -> list[StreamedEvent]:
@@ -40,13 +31,15 @@ async def test_is_an_event_bus(bus: EventBus) -> None:
 
 
 async def test_publish_then_tail_preserves_order(bus: EventBus) -> None:
-    await bus.publish("sess-1", StageEvent(stage=FsmState.PLANNING))
-    await bus.publish("sess-1", StageEvent(stage=FsmState.GENERATING))
-    await bus.publish("sess-1", DoneEvent())
+    ids = [
+        await bus.publish("sess-1", StageEvent(stage=FsmState.PLANNING)),
+        await bus.publish("sess-1", StageEvent(stage=FsmState.GENERATING)),
+        await bus.publish("sess-1", DoneEvent()),
+    ]
 
     got = await _take(bus.tail("sess-1"), 3)
 
-    assert [e.id for e in got] == ["1", "2", "3"]
+    assert [e.id for e in got] == ids
     first = got[0].event
     assert isinstance(first, StageEvent) and first.stage is FsmState.PLANNING
     assert isinstance(got[2].event, DoneEvent)
@@ -63,11 +56,11 @@ async def test_streams_are_isolated_per_session(bus: EventBus) -> None:
 async def test_reconnect_resumes_after_last_id(bus: EventBus) -> None:
     await bus.publish("sess-1", StageEvent(stage=FsmState.PLANNING))
     mid = await bus.publish("sess-1", StageEvent(stage=FsmState.GENERATING))
-    await bus.publish("sess-1", DoneEvent())
+    last = await bus.publish("sess-1", DoneEvent())
 
     # Reconnect with the id we last saw: only what came after it should arrive.
     got = await _take(bus.tail("sess-1", last_id=mid), 1)
-    assert got[0].id == "3"
+    assert got[0].id == last
     assert isinstance(got[0].event, DoneEvent)
 
 

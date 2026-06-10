@@ -7,6 +7,7 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "aioboto3>=15.5.0",
     "fastapi>=0.136.3",
     "httpx>=0.28.1",
     "insightface>=1.0.1",
@@ -35,6 +36,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.16",
+    "testcontainers[minio,redis]>=4.14.2",
     "types-pyyaml>=6.0.12.20260518",
 ]
 
@@ -51,6 +53,11 @@ strict = true
 plugins = ["pydantic.mypy"]
 mypy_path = "src"
 files = ["src", "tests"]
+
+# Untyped third parties: values from them flow in as Any at the boundary.
+[[tool.mypy.overrides]]
+module = ["aioboto3.*", "botocore.*", "testcontainers.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

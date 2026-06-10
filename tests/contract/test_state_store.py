@@ -2,16 +2,13 @@
 
 Pins the five responsibilities — face/session round-trips, token-fenced locking,
 set-if-absent idempotency, and atomic budget reservation — independently of the
-backing store. Parametrize ``store`` with a real connector later; the assertions
-do not change.
+backing store. The ``store`` fixture (tests/conftest.py) parametrizes every test
+over all implementations: in-memory and Redis.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-
-import pytest
 
 from protocols import StateStore
 from schemas import (
@@ -21,20 +18,8 @@ from schemas import (
     SessionState,
     Verdict,
 )
-from tests.fakes import InMemoryStateStore
 
 TTL = 60
-
-# The seam: append real-connector factories here; every test below runs on each.
-STORE_FACTORIES = [
-    pytest.param(InMemoryStateStore, id="memory"),
-]
-
-
-@pytest.fixture(params=STORE_FACTORIES)
-def store(request: pytest.FixtureRequest) -> StateStore:
-    factory: Callable[[], StateStore] = request.param
-    return factory()
 
 
 def _face(face_key: str = "face-1") -> FaceProfile:

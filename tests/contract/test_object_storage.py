@@ -1,27 +1,16 @@
 """Contract: :class:`~protocols.object_storage.ObjectStorage`.
 
 Pins the blob round-trip, the key echo, last-write-wins, and the miss behavior
-(:class:`KeyError`) every backend must share.
+(:class:`KeyError`) every backend must share. The ``storage`` fixture
+(tests/conftest.py) parametrizes every test over all implementations:
+in-memory, local directory, and S3 (MinIO).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import pytest
 
 from protocols import ObjectStorage
-from tests.fakes import InMemoryObjectStorage
-
-STORAGE_FACTORIES = [
-    pytest.param(InMemoryObjectStorage, id="memory"),
-]
-
-
-@pytest.fixture(params=STORAGE_FACTORIES)
-def storage(request: pytest.FixtureRequest) -> ObjectStorage:
-    factory: Callable[[], ObjectStorage] = request.param
-    return factory()
 
 
 async def test_is_object_storage(storage: ObjectStorage) -> None:

@@ -1,4 +1,4 @@
-.PHONY: help setup sync lint fmt type test run presets-dev presets-build
+.PHONY: help setup sync lint fmt type test run infra infra-down presets-dev presets-build
 .DEFAULT_GOAL := help
 
 # Sibling checkout of the private preset library (override: make X PRESETS=...).
@@ -32,6 +32,12 @@ test:   ## run tests (pass ARGS=... for a single test)
 
 run:    ## run the worker
 	PYTHONPATH=src uv run python -m main
+
+infra:  ## start local backing services (redis) via docker compose
+	docker compose up -d --wait
+
+infra-down: ## stop local backing services
+	docker compose down
 
 presets-dev:   ## local dev: editable-install the private library (PRESETS=../presets) for PRESET_SOURCE=package
 	uv pip install -e $(PRESETS)

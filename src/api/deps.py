@@ -1,9 +1,11 @@
 """DI — the only place the graph meets concrete connectors.
 
-`build_container` picks the wiring by `Settings.connectors` and assembles the
-compiled graph plus the `SessionRunner` that drives it. Routes pull the
-container off `app.state`; nothing below the API layer ever imports a concrete
-connector.
+`build_container` picks the wiring from `Settings` — `redis_url` set → Redis
+store/bus, unset → in-memory; `object_storage` picks S3 or a local directory —
+and assembles the compiled graph plus the `SessionRunner` that drives it. The
+choice happens once, at process start; there is no runtime failover between
+backends. Routes pull the container off `app.state`; nothing below the API
+layer ever imports a concrete connector.
 
 The runner lives here (not in graph/) because it is process-level glue: it owns
 background tasks and translates the graph's interrupt surface into bus events —
@@ -21,12 +23,21 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
+from redis.asyncio import Redis
 
 from config import Settings
 from graph.builder import build_graph
 from graph.state import GraphState
-from protocols.event_bus import EventBus
+from protocols import EventBus, ObjectStorage, StateStore
 from schemas import FailedEvent, NeedInputEvent
+from services.connectors import (
+    InMemoryEventBus,
+    InMemoryStateStore,
+    LocalObjectStorage,
+    RedisEventBus,
+    RedisStateStore,
+    S3ObjectStorage,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -89,26 +100,47 @@ class Container:
     """Everything the API layer needs, assembled once per app."""
 
     settings: Settings
+    store: StateStore
     bus: EventBus
+    storage: ObjectStorage
+    redis: Redis | None  # owned client behind store+bus; None on in-memory wiring
     runner: SessionRunner = field(init=False)
+
+    async def aclose(self) -> None:
+        await self.runner.aclose()
+        if isinstance(self.storage, S3ObjectStorage):
+            await self.storage.aclose()
+        if self.redis is not None:
+            await self.redis.aclose()
 
 
 def build_container(settings: Settings) -> Container:
-    if settings.connectors == "fake":
-        # Dev/test wiring reuses the contract-tested fakes; the app runs from
-        # the repo root, so `tests` is importable outside the installed tree.
-        from tests.fakes.store import InMemoryEventBus
-
-        bus: EventBus = InMemoryEventBus()
+    redis: Redis | None = None
+    if settings.redis_url:
+        redis = Redis.from_url(settings.redis_url)
+        store: StateStore = RedisStateStore(redis)
+        bus: EventBus = RedisEventBus(redis, maxlen=settings.event_stream_maxlen)
     else:
-        raise NotImplementedError(
-            "connectors='real' needs the Redis connectors — not part of the skeleton"
-        )
+        store = InMemoryStateStore()
+        bus = InMemoryEventBus()
 
-    # In-memory checkpointer for the skeleton; the Redis saver replaces it
-    # behind the same BaseCheckpointSaver seam.
+    storage: ObjectStorage
+    if settings.object_storage == "s3":
+        assert settings.s3_bucket is not None  # enforced by the Settings validator
+        storage = S3ObjectStorage(
+            bucket=settings.s3_bucket,
+            endpoint_url=settings.s3_endpoint_url,
+            region=settings.s3_region,
+            access_key=settings.s3_access_key,
+            secret_key=settings.s3_secret_key,
+        )
+    else:
+        storage = LocalObjectStorage(settings.local_storage_path)
+
+    # In-memory checkpointer for now; the Redis saver replaces it behind the
+    # same BaseCheckpointSaver seam when the graph grows real persistence.
     graph = build_graph(bus, checkpointer=InMemorySaver())
 
-    container = Container(settings=settings, bus=bus)
+    container = Container(settings=settings, store=store, bus=bus, storage=storage, redis=redis)
     container.runner = SessionRunner(graph, bus)
     return container
