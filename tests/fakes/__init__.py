@@ -8,6 +8,7 @@ tests run against the real connectors.
 from __future__ import annotations
 
 from tests.fakes.embedder import DeterministicEmbedder
+from tests.fakes.face_analyzer import ScriptedFaceAnalyzer
 from tests.fakes.generator import FixedImageGenerator, GenerateCall
 from tests.fakes.slot_filler import FillCall, FixedSlotFiller
 from tests.fakes.storage import InMemoryObjectStorage
@@ -22,4 +23,5 @@ __all__ = [
     "InMemoryEventBus",
     "InMemoryObjectStorage",
     "InMemoryStateStore",
+    "ScriptedFaceAnalyzer",
 ]

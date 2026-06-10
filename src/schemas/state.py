@@ -21,7 +21,7 @@ from decimal import Decimal
 from pydantic import Field
 
 from schemas.base import SchemaModel, StrictModel
-from schemas.enums import FsmState, GateReason, RiskLevel, Verdict
+from schemas.enums import FsmState, GateReason, Gender, RiskLevel, Verdict
 from schemas.presets import Thresholds
 
 
@@ -65,10 +65,16 @@ class FaceProfile(SchemaModel):
     """
 
     face_key: str
-    embedding: list[float]  # identity vector — biometric, never logged
+    # Identity vector — biometric, never logged. Empty when no face was detected
+    # (the gate then says NO_FACE and the profile is unusable for generation).
+    embedding: list[float]
     gate_verdict: Verdict
     gate_reason: GateReason
     metrics: FrameMetrics
+    # Estimated by the CV attribute model; generation hints for preset matching
+    # (applies_to.gender / applies_to.age), not identity claims.
+    gender: Gender | None = None
+    age: int | None = None
     convergence: ConvergenceStats = Field(default_factory=ConvergenceStats)
     photo_ref: str  # object-storage key of the input photo
 

@@ -1,0 +1,4 @@
+# Biometric test data stays local — only the docs and this file are tracked.
+*
+!README.md
+!.gitignore

@@ -1,4 +1,4 @@
-.PHONY: help setup sync lint fmt type test run infra infra-down presets-dev presets-build
+.PHONY: help setup sync lint fmt type test run infra infra-down models presets-dev presets-build
 .DEFAULT_GOAL := help
 
 # Sibling checkout of the private preset library (override: make X PRESETS=...).
@@ -32,6 +32,9 @@ test:   ## run tests (pass ARGS=... for a single test)
 
 run:    ## run the worker
 	PYTHONPATH=src uv run python -m main
+
+models: ## download InsightFace weights into INSIGHTFACE_ROOT (never committed)
+	PYTHONPATH=src uv run python scripts/download_models.py
 
 infra:  ## start local backing services (redis) via docker compose
 	docker compose up -d --wait

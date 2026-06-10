@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# InsightFace model weights (downloaded via `make models`, see INSIGHTFACE_ROOT)
+.models/

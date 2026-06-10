@@ -57,6 +57,18 @@ class RiskLevel(StrEnum):
     HIGH = "high"
 
 
+class Gender(StrEnum):
+    """Perceived gender of the input face, as estimated by the CV attribute model.
+
+    The values double as preset ``applies_to.gender`` tokens, so matching is a
+    plain membership test. It is a generation hint (which presets fit), never an
+    identity claim — absent/uncertain stays ``None`` on the profile.
+    """
+
+    MALE = "male"
+    FEMALE = "female"
+
+
 class GateReason(StrEnum):
     """Why the input-photo quality gate produced its verdict.
 

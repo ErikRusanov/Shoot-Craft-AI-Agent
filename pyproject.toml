@@ -52,11 +52,11 @@ python_version = "3.14"
 strict = true
 plugins = ["pydantic.mypy"]
 mypy_path = "src"
-files = ["src", "tests"]
+files = ["src", "tests", "scripts"]
 
 # Untyped third parties: values from them flow in as Any at the boundary.
 [[tool.mypy.overrides]]
-module = ["aioboto3.*", "botocore.*", "testcontainers.*"]
+module = ["aioboto3.*", "botocore.*", "insightface.*", "testcontainers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -51,8 +51,24 @@ class Settings(BaseSettings):
 
     # --- Face check (CV, not LLM) ---
     insightface_model: str = "buffalo_l"
+    # Weights live outside the repo and the image; `make models` downloads the
+    # pack here. The connector refuses to silently download at startup.
+    insightface_root: str = "./.models"
+    insightface_det_size: int = 640  # detector input side, px
     # Cosine similarity threshold for "same identity"; tuned against the model pack.
     face_match_threshold: float = 0.35
+
+    # --- Input-photo quality gate ---
+    # Thresholds on FrameMetrics; deps assembles them into a GateThresholds for
+    # services/quality_gate. Defaults are starting points, expected to be tuned.
+    gate_min_side: int = 512  # min(width, height) of the frame, px
+    gate_min_face_area_ratio: float = 0.04  # face bbox area / frame area
+    gate_min_blur_var: float = 60.0  # Laplacian variance on the face crop
+    gate_max_yaw: float = 35.0  # degrees, absolute
+    gate_max_pitch: float = 25.0  # degrees, absolute
+    gate_max_roll: float = 30.0  # degrees, absolute
+    gate_min_brightness: float = 50.0  # mean luma 0..255 on the face crop
+    gate_max_brightness: float = 230.0
 
     # --- Object storage ---
     object_storage: Literal["s3", "local"] = "local"

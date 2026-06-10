@@ -5,17 +5,22 @@ fake, a real face photo for InsightFace — so each parameter supplies its own
 sample images alongside the implementation. The assertions are about the *vector
 relationship*, which holds regardless: identical input embeds identically, and
 two distinct identities embed apart.
+
+The InsightFace case needs local-only prerequisites (weights + photo fixtures,
+see ``tests/fixtures``) and skips with instructions when they are absent.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cache
 
 import numpy as np
 import pytest
 
 from protocols import Embedder
+from tests import fixtures
 from tests.fakes import DeterministicEmbedder
 
 
@@ -36,8 +41,27 @@ def _fake_case() -> EmbedCase:
     )
 
 
+@cache
+def _insightface_embedder() -> Embedder:
+    # Cached: loading the ONNX pack costs ~a second and the instance is
+    # stateless across calls — one is enough for the whole module.
+    from services.connectors.insightface_embedder import InsightFaceEmbedder
+
+    return InsightFaceEmbedder(
+        model_pack=fixtures.INSIGHTFACE_MODEL, root=fixtures.INSIGHTFACE_ROOT
+    )
+
+
+def _insightface_case() -> EmbedCase:
+    fixtures.require_weights()
+    image_a = fixtures.require_fixture(fixtures.FACE_A)
+    image_b = fixtures.require_fixture(fixtures.FACE_B)
+    return EmbedCase(embedder=_insightface_embedder(), image_a=image_a, image_b=image_b)
+
+
 CASE_FACTORIES = [
     pytest.param(_fake_case, id="deterministic"),
+    pytest.param(_insightface_case, id="insightface"),
 ]
 
 

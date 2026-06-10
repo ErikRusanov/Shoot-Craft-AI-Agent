@@ -19,7 +19,7 @@ from schemas.contract import (
     StartSessionRequest,
     StartSessionResponse,
 )
-from schemas.enums import FsmState, GateReason, RiskLevel, Verdict
+from schemas.enums import FsmState, GateReason, Gender, RiskLevel, Verdict
 from schemas.events import (
     CostEvent,
     DoneEvent,
@@ -73,6 +73,7 @@ __all__ = [
     "FrameMetrics",
     "FsmState",
     "GateReason",
+    "Gender",
     "Generation",
     "IngestPhotoRequest",
     "IngestPhotoResponse",
