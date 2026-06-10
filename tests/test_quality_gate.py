@@ -268,7 +268,7 @@ REAL_THRESHOLDS = GateThresholds(
     min_side=512,
     min_face_side=128.0,
     max_secondary_face_ratio=0.25,
-    min_blur_var=80.0,
+    min_blur_var=60.0,
     min_brightness=50.0,
     max_brightness=230.0,
 )
@@ -321,6 +321,25 @@ async def test_real_noisy_dim_photo_fails_the_gate() -> None:
 
     assert profile.gate_verdict is Verdict.BELOW_FLOOR
     assert profile.gate_reason is GateReason.BLURRY
+
+
+async def test_real_extreme_closeup_is_still_detected() -> None:
+    # A face filling the whole frame is bigger than SCRFD's anchors and
+    # detects as "no face" without the padded retry in the connector. Users
+    # send exactly this (a tight selfie), so it must come back as a face.
+    vision = _real_vision()
+    data = fixtures.require_fixture(fixtures.FACE_A)
+    frame = images.decode_rgb(data)
+    faces = await _real_analyzer().analyze(data)
+    closeup = images.crop_bbox(frame, faces[0].bbox, margin=0.05)
+
+    profile = await vision.build_face_profile(
+        images.encode_jpeg(closeup), face_key="fixture-a-closeup", photo_ref="ref-a-closeup"
+    )
+
+    assert profile.gate_reason is not GateReason.NO_FACE
+    assert profile.metrics.face_count >= 1
+    assert len(profile.embedding) == 512
 
 
 async def test_real_photo_blurred_fails_the_gate() -> None:

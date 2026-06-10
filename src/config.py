@@ -69,8 +69,10 @@ class Settings(BaseSettings):
     # background passers-by sit far below this.
     gate_max_secondary_face_ratio: float = 0.25  # secondary bbox area / primary bbox area
     # On the *denoised* face crop (see FrameMetrics.blur_var). Calibrated on
-    # real photos: a good sharp face measures ~150+, a noisy pub shot ~57.
-    gate_min_blur_var: float = 80.0
+    # 22 labeled real photos: usable faces measure >= 65, soft/noisy/heavily
+    # retouched ones <= 53. The bands sit close — revisit once the generation
+    # loop shows which anchors actually produce bad output.
+    gate_min_blur_var: float = 60.0
     gate_min_brightness: float = 50.0  # mean luma 0..255 on the face crop
     gate_max_brightness: float = 230.0
 

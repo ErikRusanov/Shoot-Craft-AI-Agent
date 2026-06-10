@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
+from PIL import Image, ImageOps
 
 from protocols import DetectedFace
 from schemas import Gender
@@ -68,19 +69,39 @@ class InsightFaceEmbedder:
             raise ValueError("no face detected — cannot embed")
         return faces[0].embedding
 
+    # Border (fraction of the longer side) for the close-up detection retry.
+    _PAD_FRACTION = 0.25
+
     def _analyze_sync(self, image: bytes) -> list[DetectedFace]:
-        rgb = np.asarray(images.decode_rgb(image))
+        frame = images.decode_rgb(image)
+        faces = self._detect(frame)
+        if not faces:
+            # SCRFD has no anchors for a face larger than the frame, so an
+            # extreme close-up (selfie filling the whole shot) detects as
+            # "no face". A neutral border shrinks the face relative to the
+            # canvas; bboxes are mapped back to frame coordinates. Doubles
+            # inference only on the otherwise-rejected zero-face path.
+            pad = round(max(frame.size) * self._PAD_FRACTION)
+            padded = ImageOps.expand(frame, border=pad, fill=(127, 127, 127))
+            faces = self._detect(padded, offset=pad)
+        return faces
+
+    def _detect(self, frame: Image.Image, *, offset: int = 0) -> list[DetectedFace]:
+        rgb = np.asarray(frame)
         bgr = np.ascontiguousarray(rgb[:, :, ::-1])  # insightface is cv2-conventioned
         detected = self._app.get(bgr)
 
-        faces = [self._to_face(f) for f in detected]
+        faces = [self._to_face(f, offset=offset) for f in detected]
         # Port contract: largest bbox first, so [0] is the primary face.
         faces.sort(key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]), reverse=True)
         return faces
 
     @staticmethod
-    def _to_face(face: Any) -> DetectedFace:
-        x1, y1, x2, y2 = (float(v) for v in face.bbox)
+    def _to_face(face: Any, *, offset: int = 0) -> DetectedFace:
+        # A bbox found on a padded canvas may overhang the original frame
+        # after the shift — metrics clamp it (vision) and crops clamp it
+        # (utils.images), so it is kept as-is here.
+        x1, y1, x2, y2 = (float(v) - offset for v in face.bbox)
         # landmark_3d_68 sets pose as [pitch, yaw, roll] degrees; genderage sets
         # gender (1=male) and age. Either model may be absent from a slim pack.
         pose = face.get("pose")
