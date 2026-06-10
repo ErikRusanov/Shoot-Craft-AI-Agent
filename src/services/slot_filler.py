@@ -44,8 +44,9 @@ def _match_option(answer: str, options: list[object]) -> str | None:
 
 
 class DefaultSlotFiller:
-    """Fills every slot from its default; the asked slot from the user's answer
-    when the answer matches the slot's vocabulary."""
+    """Fills every slot from its default; the asked slot from the user's answer —
+    snapped to the enum when the slot has one, taken verbatim when it is free-form
+    (the fallback preset's ``scene``). The prompt builder sanitizes free-form text."""
 
     async def fill(
         self,
@@ -59,8 +60,16 @@ class DefaultSlotFiller:
         slots: dict[str, str] = {}
         for name, slot in preset.slots.items():
             value = slot.default
-            if slot.ask and user_answer is not None and slot.enum:
-                value = _match_option(user_answer, slot.enum) or value
+            if slot.ask and user_answer is not None:
+                if slot.enum:
+                    # Enum ask slot: snap the answer to the preset's vocabulary.
+                    value = _match_option(user_answer, slot.enum) or value
+                else:
+                    # Free-form ask slot (e.g. the fallback's `scene`): the
+                    # user's own words fill it. The prompt builder is the trust
+                    # boundary that sanitizes this text before it enters the
+                    # frozen blocks, so the filler passes it through verbatim.
+                    value = user_answer
             if value is None:
                 raise ValueError(
                     f"slot {name!r} of preset {preset.id!r} has no default and no match"

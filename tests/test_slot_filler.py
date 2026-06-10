@@ -32,6 +32,13 @@ def headshot(library: PresetLibrary) -> Preset:
     return preset
 
 
+@pytest.fixture(scope="module")
+def fallback(library: PresetLibrary) -> Preset:
+    preset = library.get("default")
+    assert preset is not None
+    return preset
+
+
 def _defaults(preset: Preset) -> dict[str, str]:
     return {name: str(slot.default) for name, slot in preset.slots.items()}
 
@@ -67,6 +74,21 @@ async def test_answer_never_steers_non_ask_slots(headshot: Preset) -> None:
         preset=headshot, user_answer="dark blazer please", photo_analysis=None
     )
     assert fill.slots["attire"] == str(headshot.slots["attire"].default)
+
+
+async def test_freeform_ask_slot_takes_answer_verbatim(fallback: Preset) -> None:
+    # The fallback's `scene` is free-form (no enum): the user's own words fill it,
+    # not snapped to a vocabulary. Non-ask enum slots still resolve to defaults.
+    answer = "on a windswept cliff overlooking the sea at dusk"
+    fill = await DefaultSlotFiller().fill(preset=fallback, user_answer=answer, photo_analysis=None)
+    assert fill.slots["scene"] == answer
+    assert fill.slots["lighting"] == str(fallback.slots["lighting"].default)
+
+
+async def test_freeform_ask_slot_without_answer_uses_default(fallback: Preset) -> None:
+    fill = await DefaultSlotFiller().fill(preset=fallback, user_answer=None, photo_analysis=None)
+    assert fill.slots["scene"] == str(fallback.slots["scene"].default)
+    assert fill.slots["scene"] != "None"
 
 
 async def test_every_slot_filled_and_in_vocabulary(library: PresetLibrary) -> None:

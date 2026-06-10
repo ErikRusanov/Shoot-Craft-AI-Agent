@@ -12,10 +12,11 @@ import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 from config import Settings
 from schemas.presets import Preset
-from services.preset_matcher import PresetLibrary, load_library
+from services.preset_matcher import PresetLibrary, _check_min_version, load_library
 
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 _EXAMPLES = Path(__file__).resolve().parents[1] / "presets" / "examples"
@@ -41,8 +42,69 @@ def test_get_and_match(library: PresetLibrary) -> None:
     hit = library.match(use_case="resume", gender="female", age=30)
     assert hit is not None and hit.id == "demo_headshot"
 
-    # Age outside every preset's range yields no match (not an exception).
+    # Age outside every preset's range yields no match (not an exception); the
+    # bare filter does not fall back — resolve() does.
     assert library.match(use_case="headshot", gender="male", age=5) is None
+
+
+def test_resolve_falls_back_to_default(library: PresetLibrary) -> None:
+    # Nothing curated admits this request, so resolve() returns the fallback.
+    assert library.match(use_case="underwater-ballet", gender="male", age=30) is None
+    resolved = library.resolve(use_case="underwater-ballet", gender="male", age=30)
+    assert resolved is not None and resolved.id == "default"
+
+
+def test_resolve_prefers_a_real_match(library: PresetLibrary) -> None:
+    # When something curated matches, resolve() returns it, not the fallback.
+    resolved = library.resolve(use_case="avatar", gender="male", age=30)
+    assert resolved is not None and resolved.id == "demo_avatar"
+
+
+def test_default_token_is_never_keyword_matched(library: PresetLibrary) -> None:
+    # The reserved token is excluded from the filter: even asking for it by name
+    # reaches the fallback only through resolve(), never as a keyword match.
+    assert library.match(use_case="default", gender="male", age=30) is None
+    assert library.fallback is not None and library.fallback.id == "default"
+    resolved = library.resolve(use_case="default", gender="male", age=30)
+    assert resolved is not None and resolved.id == "default"
+
+
+def test_no_fallback_returns_none(tmp_path: Path) -> None:
+    # A minimal custom library without a `default` preset: resolve() returns None
+    # rather than inventing a fallback.
+    shutil.copy(_EXAMPLES / "demo_avatar.yaml", tmp_path / "demo_avatar.yaml")
+    settings = Settings(_env_file=None, preset_source="path", preset_library_path=str(tmp_path))
+    library = load_library(settings)
+    assert library.fallback is None
+    assert library.resolve(use_case="nope", gender="male", age=30) is None
+
+
+def test_reserved_token_on_non_default_fails_loudly(tmp_path: Path) -> None:
+    data = yaml.safe_load((_EXAMPLES / "demo_avatar.yaml").read_text(encoding="utf-8"))
+    data["applies_to"]["use_case"].append("default")
+    (tmp_path / "demo_avatar.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+    settings = Settings(_env_file=None, preset_source="path", preset_library_path=str(tmp_path))
+    with pytest.raises(ValueError, match="reserved use_case token"):
+        load_library(settings)
+
+
+def test_default_preset_without_reserved_token_fails_loudly(tmp_path: Path) -> None:
+    data = yaml.safe_load((_EXAMPLES / "default.yaml").read_text(encoding="utf-8"))
+    data["applies_to"]["use_case"] = ["avatar"]
+    (tmp_path / "default.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+    settings = Settings(_env_file=None, preset_source="path", preset_library_path=str(tmp_path))
+    with pytest.raises(ValueError, match="must declare the reserved"):
+        load_library(settings)
+
+
+def test_min_version_check() -> None:
+    # Older than the required minimum → loud failure; equal/newer → fine.
+    with pytest.raises(ValueError, match="older than the required"):
+        _check_min_version("0.2.9", "0.3.0")
+    _check_min_version("0.3.0", "0.3.0")
+    _check_min_version("1.0.0", "0.3.0")
+    # An unparseable version is tolerated (logged, not fatal).
+    _check_min_version("unknown", "0.3.0")
 
 
 def _presets(library: PresetLibrary) -> list[Preset]:

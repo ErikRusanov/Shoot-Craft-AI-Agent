@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import importlib.resources
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,16 @@ log = structlog.get_logger()
 # Repo root: src/services/preset_matcher.py -> parents[2] == repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _EXAMPLES_DIR = _REPO_ROOT / "presets" / "examples"
+
+# The reserved fallback preset (library convention, ≥ photocore-presets 0.3.0):
+# its id is `default` and its sole ``applies_to.use_case`` token is `default`.
+# That token is reserved — it must not appear in any other preset, and the
+# keyword matcher must never reach the fallback through it. The fallback is
+# reachable only via ``resolve()`` when nothing else matches.
+_FALLBACK_ID = "default"
+_RESERVED_USE_CASE = "default"
+
+_SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
 
 @dataclass(frozen=True)
@@ -70,9 +81,14 @@ class PresetLibrary:
 
         Intentionally a simple linear filter — the seam for real ranking later.
         ``any`` in a preset's ``gender`` (or ``use_case``) acts as a wildcard.
+        The reserved fallback is skipped here: it is *never* keyword-matched, only
+        reached via :meth:`resolve` when nothing else admits the request — even a
+        literal ``use_case="default"`` falls through to the fallback, not a match.
         """
         for preset in self._by_id.values():
             a = preset.applies_to
+            if _RESERVED_USE_CASE in a.use_case:
+                continue  # reserved fallback — reachable only through resolve()
             if use_case not in a.use_case and "any" not in a.use_case:
                 continue
             if gender not in a.gender and "any" not in a.gender:
@@ -82,6 +98,24 @@ class PresetLibrary:
                 continue
             return preset
         return None
+
+    @property
+    def fallback(self) -> Preset | None:
+        """The reserved ``default`` fallback preset, or ``None`` if absent.
+
+        Always present in a ``package``-mode library (guaranteed from
+        photocore-presets 0.3.0); a minimal custom ``path`` library may omit it.
+        """
+        return self._by_id.get(_FALLBACK_ID)
+
+    def resolve(self, *, use_case: str, gender: str, age: int) -> Preset | None:
+        """Best ``applies_to`` match, else the reserved ``default`` fallback.
+
+        This is the entry point the orchestration uses: a request that no curated
+        preset admits resolves to the fallback rather than failing. Returns
+        ``None`` only when nothing matches *and* the library ships no fallback.
+        """
+        return self.match(use_case=use_case, gender=gender, age=age) or self.fallback
 
 
 def load_library(settings: Settings) -> PresetLibrary:
@@ -94,10 +128,20 @@ def load_library(settings: Settings) -> PresetLibrary:
         preset = Preset(**data)  # raises on any schema violation
         if preset.id in by_id:
             raise ValueError(f"duplicate preset id {preset.id!r} in {source} library")
+        _check_reserved_token(preset, source)
         by_id[preset.id] = preset
 
     if not by_id:
         raise ValueError(f"no presets found in {source} library at {root!r}")
+
+    if settings.preset_source == "package":
+        _check_min_version(version, settings.preset_min_library_version)
+        if _FALLBACK_ID not in by_id:
+            raise ValueError(
+                f"{source} library has no reserved {_FALLBACK_ID!r} fallback preset; "
+                f"the fallback convention requires photocore-presets "
+                f">= {settings.preset_min_library_version}"
+            )
 
     log.info(
         "preset_library_loaded",
@@ -131,6 +175,48 @@ def _resolve_source(settings: Settings) -> tuple[Path, str, str]:
         return root, f"path:{root}", "path"
 
     return _EXAMPLES_DIR, "examples", "examples"
+
+
+def _check_reserved_token(preset: Preset, source: str) -> None:
+    """Enforce the reserved-token convention at load time.
+
+    The ``default`` use_case token may appear only on the fallback preset (whose
+    id is ``default``), and the fallback must claim exactly that token — so a
+    typo'd or mis-scoped preset fails loudly instead of silently shadowing the
+    fallback or leaking it into keyword matching.
+    """
+    declares_token = _RESERVED_USE_CASE in preset.applies_to.use_case
+    is_fallback = preset.id == _FALLBACK_ID
+    if declares_token and not is_fallback:
+        raise ValueError(
+            f"{source} library: preset {preset.id!r} declares the reserved "
+            f"use_case token {_RESERVED_USE_CASE!r}, allowed only on the "
+            f"{_FALLBACK_ID!r} fallback preset"
+        )
+    if is_fallback and not declares_token:
+        raise ValueError(
+            f"{source} library: fallback preset {_FALLBACK_ID!r} must declare the "
+            f"reserved use_case token {_RESERVED_USE_CASE!r}"
+        )
+
+
+def _check_min_version(version: str, minimum: str) -> None:
+    """Fail fast if a ``package``-mode library predates the fallback convention.
+
+    Only meaningful for real semver package versions; the ``path``/``examples``
+    markers never reach here. A version that does not parse as semver is logged
+    and allowed through rather than blocking startup on an odd version string.
+    """
+    have, want = _SEMVER.match(version), _SEMVER.match(minimum)
+    if have is None:
+        log.warning("preset_library_version_unparsed", version=version, minimum=minimum)
+        return
+    assert want is not None  # minimum is a controlled constant/setting
+    if tuple(map(int, have.groups())) < tuple(map(int, want.groups())):
+        raise ValueError(
+            f"photocore-presets {version} is older than the required >= {minimum}: "
+            f"the reserved {_FALLBACK_ID!r} fallback convention needs >= {minimum}"
+        )
 
 
 def _package_version(pkg: str) -> str:

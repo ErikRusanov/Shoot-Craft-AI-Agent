@@ -245,3 +245,13 @@ def test_demo_presets_validate(yaml_path: Path) -> None:
     data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     preset = Preset(**data)
     assert preset.id == yaml_path.stem
+
+
+def test_freeform_ask_slot_validates() -> None:
+    """A free-form ask slot — ``ask:true`` with no ``enum`` — is valid (the
+    fallback preset's ``scene``). The schema must not require an enum on ask slots."""
+    from schemas.presets import Slot
+
+    slot = Slot(required=True, ask=True, default="in a natural setting")
+    assert slot.ask is True
+    assert slot.enum is None

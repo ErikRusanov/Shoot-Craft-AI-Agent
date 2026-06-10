@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     # the core never depends on this package; the private image installs it.
     preset_package: str = "photocore_presets"
     preset_library_path: str | None = None
+    # Runtime expectation on the curated library in 'package' mode. The reserved
+    # `default` fallback preset (and its convention) landed in 0.3.0; a prod
+    # deploy that pulls an older package fails fast at startup rather than
+    # silently losing the fallback. Only enforced for 'package' mode.
+    preset_min_library_version: str = "0.3.0"
 
     # --- Generation loop / budget safety ---
     # budget_limit is supplied per session by the business service; this is only a

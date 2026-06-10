@@ -111,6 +111,17 @@ loads into memory at startup, indexes, and holds it immutably:
 - `PRESET_SOURCE=path` + `PRESET_LIBRARY_PATH=…` (dev/custom) → read that dir
 - default (no config) → `presets/examples/` from this repo
 
+**Fallback convention (needs `photocore-presets >= 0.3.0`).** The id `default`
+is the reserved fallback preset; its only `applies_to.use_case` token is
+`default`, reserved and never used elsewhere. `match()` excludes that token, so
+the fallback is *never* keyword-matched — `resolve()` returns it only when no
+curated preset admits the request. Its single `ask:true` slot (`scene`) is the
+one **free-form** (no-enum) slot: the user's own words fill `{scene}`, and
+`prompt_builder` sanitizes that text (scene description only — attempts to edit
+the face/identity or override the frozen blocks are rejected, the caller
+re-asks). `PRESET_MIN_LIBRARY_VERSION` (default `0.3.0`) is enforced in
+`package` mode at startup so a deploy can't silently lose the fallback.
+
 `SessionState` must record `preset_id`, `preset_version` **and** `library_version`
 (the package version) — otherwise a result can't be reproduced after a library
 update. When the library outgrows a pip package (large/frequently-changing

@@ -1,0 +1,79 @@
+# DEMO fallback preset — MIT, ships in the public repo so the core's fallback
+# convention runs out of the box. This is NOT the curated library (the moat); it
+# only exercises the loader, the matcher fallback, and the free-form scene slot.
+#
+# Convention with the matcher: the id `default` is RESERVED. When no curated
+# preset's `applies_to` covers the request, the matcher resolves to THIS preset
+# instead of failing. The use_case token `default` is reserved too — never
+# keyword-matched, never used by another preset.
+id: default
+version: 1.0.0
+
+applies_to:
+  # The reserved fallback token — see the header. Wide gender/age so the fallback
+  # admits anyone once the matcher has decided to fall back.
+  use_case: [default]
+  gender: [male, female, any]
+  age: [12, 99]
+
+identity_instruction: >-
+  Preserve the exact facial identity of the person in the reference photo: the
+  same face geometry, eyes, nose, lips, jawline, skin tone, and any moles or
+  scars. Do not beautify, slim, age, or restyle the face. Reproduce a faithful,
+  recognizable likeness of the same individual.
+
+# {scene} carries the user's own free-form description; the surrounding wording
+# keeps the output a grounded photorealistic portrait whatever the user asks.
+prompt_structure: >-
+  Photorealistic portrait of the person, {scene}, with {expression}. {lighting}.
+  Natural skin texture, true-to-life colors, sharp focus on the eyes, no
+  stylization beyond what the scene explicitly asks for.
+
+negative_prompt: >-
+  cartoon, illustration, 3d render, plastic or waxy skin, beauty filter,
+  distorted face, extra fingers, duplicated person, watermark, text, logo, low
+  resolution, blurry, different person.
+
+slots:
+  # The single clarifying question — FREE-FORM (no enum): the user describes the
+  # photo in their own words. The default keeps the template rendering when no
+  # answer arrives; the prompt builder sanitizes any answer that does.
+  scene:
+    required: true
+    ask: true
+    default: "in a natural, flattering setting that suits them"
+  expression:
+    required: false
+    ask: false
+    default: "a natural, relaxed expression"
+    enum:
+      - "a natural, relaxed expression"
+      - "a soft, friendly smile"
+      - "a neutral, composed expression"
+  lighting:
+    required: false
+    ask: false
+    default: "Soft, flattering light appropriate to the scene"
+    enum:
+      - "Soft, flattering light appropriate to the scene"
+      - "Warm golden-hour light"
+      - "Even, neutral studio-like light"
+
+generation:
+  temperature: 0.50
+  aspect_ratio: "3:4"
+  face_media_resolution: high
+
+thresholds:
+  similarity_threshold: 0.60  # placeholder; calibrate on real pipeline output
+  identity_floor: 0.50  # placeholder
+  K_max_retries: 3
+
+compositions:
+  - id: studio_neutral
+    label: "Studio — clean neutral backdrop"
+    slot_overrides:
+      scene: "in a clean, minimal studio against a neutral backdrop"
+      lighting: "Even, neutral studio-like light"
+
+anchor_examples: []
