@@ -16,6 +16,7 @@ the numbers are only for observability.
 
 from __future__ import annotations
 
+import asyncio
 from typing import NamedTuple
 
 from PIL import Image
@@ -66,11 +67,12 @@ class VisionService:
         ``gate_verdict`` / ``gate_reason``, not raised — so the caller can tell
         the business service exactly what to ask the user to re-shoot.
         """
-        frame = images.decode_rgb(image)
         faces = await self._analyzer.analyze(image)
         primary = faces[0] if faces else None  # analyzer contract: largest first
 
-        metrics = self._measure(frame, faces)
+        # The pixel pass (decode, median denoise, crop) is CPU-bound; off the
+        # loop, or parallel ingests serialize the whole API behind it.
+        metrics, face_crop = await asyncio.to_thread(self._pixel_pass, image, faces)
         gate = self._gate.evaluate(metrics)
 
         profile = FaceProfile(
@@ -82,7 +84,13 @@ class VisionService:
             gender=primary.gender if primary else None,
             photo_ref=photo_ref,
         )
-        return FaceIngest(profile=profile, face_crop=self._crop(frame, primary))
+        return FaceIngest(profile=profile, face_crop=face_crop)
+
+    def _pixel_pass(
+        self, image: bytes, faces: list[DetectedFace]
+    ) -> tuple[FrameMetrics, bytes | None]:
+        frame = images.decode_rgb(image)
+        return self._measure(frame, faces), self._crop(frame, faces[0] if faces else None)
 
     async def build_face_profile(
         self, image: bytes, *, face_key: str, photo_ref: str

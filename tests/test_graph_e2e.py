@@ -25,18 +25,14 @@ Pinned here:
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 from collections.abc import AsyncIterator
-from typing import Any, NamedTuple
+from typing import Any
 
 import httpx
-import numpy as np
 import pytest
-import uvicorn
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
-from PIL import Image
 from redis.asyncio import Redis
 
 from api.app import create_app
@@ -45,6 +41,7 @@ from config import Settings
 from graph.state import initial_state
 from schemas import Event, FsmState, Verdict
 from services.vision import photo_ref
+from tests.api_utils import SseFrame, collect_until, iter_sse, make_settings, noise_png, serve
 
 E2E_TIMEOUT = 30
 TTL = 3600
@@ -72,51 +69,6 @@ APPROVE_BODY = {
 }
 
 
-def noise_png(side: int = 1024) -> bytes:
-    """A noise frame: passes the gate honestly (sharp, lit, large) on real metrics."""
-    rng = np.random.default_rng(7)
-    pixels = rng.integers(0, 256, size=(side, side, 3), dtype=np.uint8)
-    buf = io.BytesIO()
-    Image.fromarray(pixels, mode="RGB").save(buf, format="PNG")
-    return buf.getvalue()
-
-
-class SseFrame(NamedTuple):
-    id: str
-    event: str
-    data: str
-
-
-async def iter_sse(lines: AsyncIterator[str]) -> AsyncIterator[SseFrame]:
-    """Minimal SSE wire parser: id/event/data fields, blank-line dispatch."""
-    frame_id, event = "", ""
-    data: list[str] = []
-    async for line in lines:
-        if not line.strip():
-            if event:
-                yield SseFrame(frame_id, event, "\n".join(data))
-                frame_id, event, data = "", "", []
-            continue
-        if line.startswith(":"):  # ping comment
-            continue
-        field, _, value = line.partition(":")
-        value = value.removeprefix(" ")
-        if field == "id":
-            frame_id = value
-        elif field == "event":
-            event = value
-        elif field == "data":
-            data.append(value)
-
-
-async def collect_until(frames: AsyncIterator[SseFrame], seen: list[SseFrame], stop: str) -> None:
-    async for frame in frames:
-        seen.append(frame)
-        if frame.event == stop:
-            return
-    raise AssertionError(f"stream ended before a {stop!r} frame")
-
-
 async def assert_budget_consumed(container: Container, session_key: str, expected: int) -> None:
     """Pin the exact counter via two probes (the port has no read) — refusal at
     ``limit=expected`` proves >= expected, acceptance at +1 proves == expected."""
@@ -136,15 +88,6 @@ async def flush_redis(redis_url: str) -> None:
     await client.aclose()
 
 
-def make_settings(tmp_path: Any, redis_url: str | None) -> Settings:
-    return Settings(
-        _env_file=None,
-        fake_connectors=True,
-        redis_url=redis_url,
-        local_storage_path=str(tmp_path / "storage"),
-    )
-
-
 @pytest.fixture(params=["memory", "redis"])
 async def app_settings(request: pytest.FixtureRequest, tmp_path: Any) -> Settings:
     redis_url: str | None = None
@@ -155,24 +98,11 @@ async def app_settings(request: pytest.FixtureRequest, tmp_path: Any) -> Setting
     return make_settings(tmp_path, redis_url)
 
 
-# httpx.ASGITransport runs the ASGI app to completion and buffers the whole
-# body, so a live SSE stream can never be observed through it — the e2e runs a
-# real uvicorn on an ephemeral port instead.
 @pytest.fixture
 async def server(app_settings: Settings) -> AsyncIterator[tuple[str, Container]]:
     app = create_app(app_settings)
-    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
-    uv_server = uvicorn.Server(config)
-    serve_task = asyncio.create_task(uv_server.serve())
-    async with asyncio.timeout(E2E_TIMEOUT):
-        while not uv_server.started:
-            if serve_task.done():
-                serve_task.result()  # surface the startup failure
-            await asyncio.sleep(0.01)
-    port = uv_server.servers[0].sockets[0].getsockname()[1]
-    yield f"http://127.0.0.1:{port}", app.state.container
-    uv_server.should_exit = True
-    await serve_task
+    async with serve(app) as url:
+        yield url, app.state.container
 
 
 async def test_full_session_e2e(server: tuple[str, Container]) -> None:
@@ -186,7 +116,8 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
     ):
         resp = await client.post("/v1/sessions/s1", json=START_BODY)
         assert resp.status_code == 202
-        assert resp.json()["accepted"] is True
+        assert resp.json()["matched"] is True
+        assert resp.json()["preset_id"] == "demo_avatar"
 
         seen: list[SseFrame] = []
         async with client.stream("GET", "/v1/sessions/s1/events") as stream:

@@ -1,0 +1,53 @@
+# Local dev stack: the core + Redis.
+#
+# Two ways to use it:
+# - `make infra`  — Redis only; the app runs on the host (`make run`).
+# - `make up`     — the full stack; the app container runs on fake model
+#   connectors by default, so it works with no OpenRouter key and no weights.
+#   For real connectors set FAKE_CONNECTORS=false, provide OPENROUTER_API_KEY
+#   and mount the InsightFace pack into /app/.models (see the volumes note).
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      FAKE_CONNECTORS: "true"
+      OBJECT_STORAGE: local
+      LOG_JSON: "true"
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - app-storage:/app/.storage
+      # Real face-check needs the weights (host: `make models` downloads them):
+      # - ./.models:/app/.models:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:8-alpine
+    # AOF on: dev state survives a container restart, same guarantee the
+    # reliability tests pin (tests/test_concurrency.py).
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+  app-storage:

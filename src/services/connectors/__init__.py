@@ -22,6 +22,7 @@ from services.connectors.openrouter_slot_filler import OpenRouterSlotFiller
 from services.connectors.redis_event_bus import RedisEventBus
 from services.connectors.redis_store import RedisStateStore
 from services.connectors.s3_storage import S3ObjectStorage
+from services.connectors.throttle import ThrottledImageGenerator
 
 __all__ = [
     "FakeFaceEngine",
@@ -37,4 +38,5 @@ __all__ = [
     "RedisEventBus",
     "RedisStateStore",
     "S3ObjectStorage",
+    "ThrottledImageGenerator",
 ]

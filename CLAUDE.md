@@ -61,7 +61,7 @@ Layered; dependencies point inward toward `protocols`/`schemas`:
   `ImageGenerator`, `StateStore`, `ObjectStorage`, `EventBus`.
 - `services/` — domain logic. Depends **only** on `protocols` and `schemas`,
   never on concrete connectors: vision, quality_gate, preset_matcher,
-  prompt_builder, facecheck, generation_loop, budget, idempotency.
+  prompt_builder, facecheck, generation_loop, budget, idempotency, telemetry.
 - `services/connectors/` — adapters implementing the ports: `redis_store` +
   `memory_store` (fallback), `redis_event_bus`, `openrouter`,
   `insightface_embedder`, `s3_storage` + `local_storage` (dev fallback).

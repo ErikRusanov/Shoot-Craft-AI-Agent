@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 import structlog
 from langchain_core.runnables import RunnableConfig
@@ -48,7 +49,7 @@ from protocols import (
     SlotFiller,
     StateStore,
 )
-from schemas import FailedEvent, NeedInputEvent
+from schemas import FailedEvent, FsmState, NeedInputEvent
 from services.budget import BudgetService
 from services.connectors import (
     FakeFaceEngine,
@@ -63,37 +64,73 @@ from services.connectors import (
     RedisEventBus,
     RedisStateStore,
     S3ObjectStorage,
+    ThrottledImageGenerator,
 )
 from services.facecheck import FaceCheckService
 from services.generation_loop import GenerationLoop
 from services.idempotency import IdempotencyService
-from services.preset_matcher import load_library
+from services.preset_matcher import PresetLibrary, load_library
 from services.quality_gate import GateThresholds, QualityGate
 from services.slot_filler import DefaultSlotFiller
+from services.telemetry import Telemetry
 from services.vision import VisionService
 
 log = structlog.get_logger(__name__)
+
+# Slack on the run lock past the wall-clock: the lock must outlive a run that
+# dies *at* the deadline (its finally still has to release), but a crashed
+# process must not wedge the session for long.
+_RUN_LOCK_GRACE_SECONDS = 60
+
+_WALL_CLOCK_REASON = "session run exceeded the wall-clock limit"
+_CANCELLED_REASON = "cancelled by the caller"
 
 
 class SessionRunner:
     """Drives graph runs in background tasks, one per session.
 
-    Both `start` and `resume` funnel into the same `_run`: invoke the graph on
+    `start` and `resume` funnel into the same `_run`: invoke the graph on
     `thread_id == session_key` and, if it paused on an interrupt, publish the
     `need_input` event from the surfaced payload. Publishing happens here —
     never inside the interrupted node — because LangGraph re-executes the node
     body on resume and an in-node publish would duplicate.
+
+    Hardening lives here too, because the runner is the only writer:
+
+    - **run lock** (``lock:run:{session_key}`` in the store) — one in-flight
+      graph run per session, across replicas, so a duplicated mutation can't
+      double-drive the FSM. Spawning fails (returns ``False``) when held.
+    - **wall clock** — a run is cancelled at ``session_wall_clock_seconds``
+      and the session fails cleanly; the lock TTL rides slightly above it,
+      so even a SIGKILLed process frees the session.
+    - **cancel** — the caller-initiated terminal: cancels the in-flight task
+      (if any), marks the session ``cancelled`` and closes the stream.
+    - **telemetry** — one de-identified outcome event per terminal run.
     """
 
-    def __init__(self, graph: CompiledStateGraph[GraphState], bus: EventBus) -> None:
+    def __init__(
+        self,
+        graph: CompiledStateGraph[GraphState],
+        bus: EventBus,
+        store: StateStore,
+        telemetry: Telemetry,
+        *,
+        wall_clock_seconds: int,
+        session_ttl_seconds: int,
+    ) -> None:
         self._graph = graph
         self._bus = bus
+        self._store = store
+        self._telemetry = telemetry
+        self._wall_clock = wall_clock_seconds
+        self._session_ttl = session_ttl_seconds
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
-    def start(
+    async def start(
         self, session_key: str, *, face_key: str, use_case: str, gender: str, budget_limit: int
-    ) -> None:
-        self._spawn(
+    ) -> bool:
+        """Begin a fresh run; ``False`` when a run is already in flight."""
+        return await self._spawn(
             session_key,
             initial_state(
                 session_key=session_key,
@@ -104,14 +141,42 @@ class SessionRunner:
             ),
         )
 
-    def resume(self, session_key: str, value: Any) -> None:
+    async def resume(self, session_key: str, value: Any) -> bool:
         """Answer the pending interrupt: a string for the ask slot, a decision
-        dict (``approved`` / ``composition_id``) for the approval gate."""
-        self._spawn(session_key, Command(resume=value))
+        dict (``approved`` / ``composition_id``) for the approval gate.
+        ``False`` when a run is already in flight."""
+        return await self._spawn(session_key, Command(resume=value))
 
-    def _spawn(self, session_key: str, payload: GraphState | Command[Any]) -> None:
+    async def cancel(self, session_key: str) -> None:
+        """Stop the session: kill the in-flight run (if any), mark the session
+        ``cancelled``, close the stream with a terminal event."""
+        task = self._tasks.get(session_key)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        session = await self._store.get_session(session_key)
+        if session is not None:
+            session.fsm_state = FsmState.CANCELLED
+            await self._store.put_session(session, ttl_seconds=self._session_ttl)
+            self._telemetry.session_terminal(session, failure_reason=_CANCELLED_REASON)
+        await self._bus.publish(session_key, FailedEvent(reason=_CANCELLED_REASON))
+
+    @staticmethod
+    def _lock_key(session_key: str) -> str:
+        return f"run:{session_key}"
+
+    async def _spawn(self, session_key: str, payload: GraphState | Command[Any]) -> bool:
+        token = uuid4().hex
+        acquired = await self._store.acquire_lock(
+            self._lock_key(session_key),
+            token=token,
+            ttl_seconds=self._wall_clock + _RUN_LOCK_GRACE_SECONDS,
+        )
+        if not acquired:
+            log.warning("session_run_locked", session_key=session_key)
+            return False
         # Keep a strong reference: asyncio only weakly holds running tasks.
-        task = asyncio.create_task(self._run(session_key, payload))
+        task = asyncio.create_task(self._run(session_key, payload, token))
         self._tasks[session_key] = task
 
         def _reap(done: asyncio.Task[None]) -> None:
@@ -120,18 +185,60 @@ class SessionRunner:
                 del self._tasks[session_key]
 
         task.add_done_callback(_reap)
+        return True
 
-    async def _run(self, session_key: str, payload: GraphState | Command[Any]) -> None:
+    async def _run(self, session_key: str, payload: GraphState | Command[Any], token: str) -> None:
         config: RunnableConfig = {"configurable": {"thread_id": session_key}}
         try:
-            result: dict[str, Any] = await self._graph.ainvoke(payload, config=config)
+            async with asyncio.timeout(self._wall_clock):
+                result: dict[str, Any] = await self._graph.ainvoke(payload, config=config)
+        except TimeoutError:
+            await self._release(session_key, token)
+            log.error("graph_run_wall_clock", session_key=session_key, limit=self._wall_clock)
+            await self._fail_session(session_key, _WALL_CLOCK_REASON)
+            return
+        except asyncio.CancelledError:
+            # cancel() owns the narration; here only the lock must not leak.
+            await asyncio.shield(self._release(session_key, token))
+            raise
         except Exception:
+            await self._release(session_key, token)
             log.exception("graph_run_failed", session_key=session_key)
             await self._bus.publish(session_key, FailedEvent(reason="internal error"))
             return
+        # Release before narrating: a client reacting to `need_input` must find
+        # the lock already free, or its immediate answer would bounce.
+        await self._release(session_key, token)
         interrupts = result.get("__interrupt__") or []
         if interrupts:
             await self._bus.publish(session_key, NeedInputEvent(**interrupts[0].value))
+            return
+        failure = result.get("failure") or {}
+        await self._emit_telemetry(session_key, failure_reason=failure.get("reason"))
+
+    async def _release(self, session_key: str, token: str) -> None:
+        try:
+            await self._store.release_lock(self._lock_key(session_key), token=token)
+        except Exception:  # a dying store must not mask the run's own outcome
+            log.warning("run_lock_release_failed", session_key=session_key)
+
+    async def _fail_session(self, session_key: str, reason: str) -> None:
+        session = await self._store.get_session(session_key)
+        if session is not None:
+            session.fsm_state = FsmState.FAILED
+            await self._store.put_session(session, ttl_seconds=self._session_ttl)
+            self._telemetry.session_terminal(session, failure_reason=reason)
+        await self._bus.publish(session_key, FailedEvent(reason=reason))
+
+    async def _emit_telemetry(self, session_key: str, *, failure_reason: str | None) -> None:
+        session = await self._store.get_session(session_key)
+        if session is None:
+            return
+        if failure_reason is None and session.fsm_state is FsmState.FAILED:
+            # The generation loop publishes its own terminal event; the graph
+            # state carries no reason for it, so name the phase at least.
+            failure_reason = "generation loop ended without a deliverable"
+        self._telemetry.session_terminal(session, failure_reason=failure_reason)
 
     async def aclose(self) -> None:
         for task in list(self._tasks.values()):
@@ -148,6 +255,9 @@ class Container:
     store: StateStore
     bus: EventBus
     storage: ObjectStorage
+    vision: VisionService
+    library: PresetLibrary
+    idempotency: IdempotencyService  # HTTP-layer replay; same store as step 4
     graph: CompiledStateGraph[GraphState]
     checkpointer: BaseCheckpointSaver[str]
     redis: Redis | None  # owned client behind store/bus/checkpointer; None on in-memory
@@ -191,9 +301,16 @@ def build_container(settings: Settings) -> Container:
     if settings.redis_url:
         redis = Redis.from_url(settings.redis_url)
         store: StateStore = RedisStateStore(redis)
-        bus: EventBus = RedisEventBus(redis, maxlen=settings.event_stream_maxlen)
+        bus: EventBus = RedisEventBus(
+            redis, maxlen=settings.event_stream_maxlen, ttl_seconds=settings.session_ttl_seconds
+        )
         # Same client, separate key space; indices are created in astart().
-        checkpointer = AsyncRedisSaver(redis_client=redis)
+        # Checkpoints follow the session TTL — an abandoned interrupt must not
+        # outlive the session state it would resume into.
+        checkpointer = AsyncRedisSaver(
+            redis_client=redis,
+            ttl={"default_ttl": settings.session_ttl_seconds / 60, "refresh_on_read": True},
+        )
     else:
         store = InMemoryStateStore()
         bus = InMemoryEventBus()
@@ -238,13 +355,19 @@ def build_container(settings: Settings) -> Container:
             det_size=settings.insightface_det_size,
         )
         analyzer, embedder = insight, insight
+    # Backpressure applies to fakes too: load tests exercise the same wiring.
+    generator = ThrottledImageGenerator(
+        generator, max_concurrent=settings.max_concurrent_generations
+    )
 
+    vision = VisionService(analyzer, QualityGate(_gate_thresholds(settings)))
+    library = load_library(settings)
     services = GraphServices(
         store=store,
         storage=storage,
         bus=bus,
-        vision=VisionService(analyzer, QualityGate(_gate_thresholds(settings))),
-        library=load_library(settings),
+        vision=vision,
+        library=library,
         slot_filler=slot_filler,
         generation_loop=GenerationLoop(
             store=store,
@@ -270,10 +393,20 @@ def build_container(settings: Settings) -> Container:
         store=store,
         bus=bus,
         storage=storage,
+        vision=vision,
+        library=library,
+        idempotency=IdempotencyService(store),
         graph=graph,
         checkpointer=checkpointer,
         redis=redis,
         openrouter=openrouter,
     )
-    container.runner = SessionRunner(graph, bus)
+    container.runner = SessionRunner(
+        graph,
+        bus,
+        store,
+        Telemetry(unit_price=settings.generation_unit_price),
+        wall_clock_seconds=settings.session_wall_clock_seconds,
+        session_ttl_seconds=settings.session_ttl_seconds,
+    )
     return container

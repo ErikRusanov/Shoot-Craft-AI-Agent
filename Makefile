@@ -1,4 +1,4 @@
-.PHONY: help setup sync lint fmt type test run infra infra-down models presets-dev presets-build
+.PHONY: help setup sync lint fmt type test run infra infra-down up down models load presets-dev presets-build
 .DEFAULT_GOAL := help
 
 # Sibling checkout of the private preset library (override: make X PRESETS=...).
@@ -36,10 +36,19 @@ run:    ## run the worker
 models: ## download InsightFace weights into INSIGHTFACE_ROOT (never committed)
 	PYTHONPATH=src uv run python scripts/download_models.py
 
-infra:  ## start local backing services (redis) via docker compose
-	docker compose up -d --wait
+load:   ## drive parallel sessions against a running core (ARGS=--sessions 50 ...)
+	PYTHONPATH=src uv run python scripts/load_test.py $(ARGS)
+
+infra:  ## start local backing services (redis only) via docker compose
+	docker compose up -d --wait redis
 
 infra-down: ## stop local backing services
+	docker compose down
+
+up:     ## full dev stack in containers: core (fake connectors) + redis
+	docker compose up -d --build --wait
+
+down:   ## stop the dev stack
 	docker compose down
 
 presets-dev:   ## local dev: editable-install the private library (PRESETS=../presets) for PRESET_SOURCE=package

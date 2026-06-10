@@ -17,7 +17,11 @@ class FsmState(StrEnum):
     Linear with one branch: ``created`` → face check → (ask the single
     clarifying question) → plan → approval → generation loop → terminal. Gate
     rejection happens at *ingest*, before a session exists, so there is no
-    pre-session ``rejected`` state here — only the terminal pair below.
+    pre-session ``rejected`` state here — only the terminals below.
+
+    ``cancelled`` is the caller-initiated terminal: distinct from ``failed``
+    so the business service can tell "the core gave up" from "we told it to
+    stop". It is set outside the graph (the cancel endpoint), never by a node.
     """
 
     CREATED = "created"
@@ -28,6 +32,7 @@ class FsmState(StrEnum):
     GENERATING = "generating"
     DONE = "done"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class Verdict(StrEnum):

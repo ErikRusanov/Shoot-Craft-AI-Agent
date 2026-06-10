@@ -13,7 +13,12 @@ Endpoints:
 - start a session         → :class:`StartSessionRequest` / :class:`StartSessionResponse`
 - answer the question     → :class:`InputAnswerRequest` / :class:`SessionAck`
 - approve the plan        → :class:`ApproveRequest` / :class:`SessionAck`
+- cancel the session      → no body (naturally idempotent) / :class:`SessionAck`
 - read the state          → :class:`SessionSnapshot`
+
+A mutation that cannot apply is an HTTP error, not an ack: 404 for a missing
+aggregate, 409 for a wrong FSM stage / a run already in flight / a duplicate
+start, 503 when the state store is unreachable.
 """
 
 from __future__ import annotations
@@ -90,10 +95,12 @@ class ApproveRequest(SchemaModel):
 
 
 class SessionAck(SchemaModel):
-    """Lean acknowledgement of a mutation — the new state, not the full snapshot.
+    """Lean acknowledgement of an accepted mutation — the new state, not the
+    full snapshot.
 
-    ``accepted`` is false when the mutation was a no-op (e.g. an answer to a
-    session not awaiting input); ``message`` carries the reason.
+    A mutation that does not apply never produces an ack — it is a 404/409
+    (see the module docstring) — so ``accepted`` stays true on the wire; the
+    field survives for callers that branch on it rather than on the status.
     """
 
     session_key: str

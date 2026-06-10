@@ -28,21 +28,30 @@ _BLOCK_MS = 5_000
 class RedisEventBus:
     """Append to and live-tail per-session Redis Streams."""
 
-    def __init__(self, client: Redis, *, maxlen: int = 1000) -> None:
+    def __init__(
+        self, client: Redis, *, maxlen: int = 1000, ttl_seconds: int | None = None
+    ) -> None:
         self._r = client
         self._maxlen = maxlen
+        self._ttl = ttl_seconds
 
     @staticmethod
     def _stream(session_key: str) -> str:
         return f"events:{session_key}"
 
     async def publish(self, session_key: str, event: Event) -> str:
-        eid = await self._r.xadd(
+        # TTL refreshed on every append: the stream must outlive the session's
+        # last activity, never the session — same regime as the state keys.
+        pipe = self._r.pipeline(transaction=False)
+        pipe.xadd(
             self._stream(session_key),
             {"data": EventAdapter.dump_json(event)},
             maxlen=self._maxlen,
             approximate=True,
         )
+        if self._ttl is not None:
+            pipe.expire(self._stream(session_key), self._ttl)
+        eid = (await pipe.execute())[0]
         return eid.decode() if isinstance(eid, bytes) else str(eid)
 
     async def tail(

@@ -29,6 +29,8 @@ COPY presets/ ./presets/
 FROM python:3.14-slim AS runtime
 
 # Native libs for onnxruntime / insightface / opencv (the CV face-check path).
+# onnxruntime is the CPU-only wheel (no CUDA libs pulled in) — CPU is enough
+# for the face-check path by design.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libgomp1 libglib2.0-0 libgl1 \
@@ -37,17 +39,32 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=builder /app /app
 
+# Non-root: the app needs to write only the weights dir and the local-storage
+# fallback; everything else stays root-owned and read-only to the process.
+RUN groupadd --system app && useradd --system --gid app --no-create-home app \
+    && mkdir -p /app/.models /app/.storage \
+    && chown app:app /app/.models /app/.storage
+
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH=/app/src \
     PYTHONUNBUFFERED=1 \
     APP_ENV=prod \
     LOG_JSON=true \
     PRESET_SOURCE=examples \
+    INSIGHTFACE_ROOT=/app/.models \
+    LOCAL_STORAGE_PATH=/app/.storage \
     HOST=0.0.0.0 \
     PORT=8000
 
+USER app
 EXPOSE 8000
 
-# InsightFace model weights are NOT committed; they are downloaded or mounted at
-# runtime. Redis / OpenRouter / storage are configured via env (see .env.example).
+# Liveness only (readiness involves Redis and belongs to the orchestrator).
+HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
+    CMD ["python", "-c", "import os,urllib.request;urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",\"8000\")}/healthz', timeout=2)"]
+
+# InsightFace model weights are NOT committed and NOT baked into the image:
+# mount them into /app/.models (or run scripts/download_models.py against the
+# volume once). Redis / OpenRouter / storage are configured via env
+# (see .env.example).
 CMD ["python", "-m", "main"]

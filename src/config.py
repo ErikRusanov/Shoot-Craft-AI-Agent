@@ -129,6 +129,22 @@ class Settings(BaseSettings):
     # hard ceiling guarding against a runaway loop.
     max_iterations: int = 8
 
+    # --- API hardening / backpressure ---
+    # Per-process cap on concurrent upstream generation calls. The semaphore
+    # sits on the ImageGenerator port, so parallel sessions queue at the model
+    # instead of stampeding it.
+    max_concurrent_generations: int = 4
+    # Hard ceiling on one graph run (one start/resume leg, not the whole
+    # session): a wedged upstream cannot hold a worker slot forever. The run
+    # lock's TTL derives from this, so a crashed holder frees the session.
+    session_wall_clock_seconds: int = 900
+    # The ingest endpoint runs CV inline (detection + embedding); bound it so a
+    # pathological input cannot park the request forever.
+    ingest_timeout_seconds: float = 60.0
+    # Decoded size cap for an ingested photo — reject absurd payloads before
+    # they reach pillow/the detector.
+    max_photo_bytes: int = 20 * 1024 * 1024
+
     # --- Cost estimation ---
     # Price of one paid generation in abstract units; the business service maps
     # units to real money. Used only for the plan's CostEstimate. Decimal, not
