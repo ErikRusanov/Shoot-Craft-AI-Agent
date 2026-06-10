@@ -34,7 +34,6 @@ START_BODY = {
     "face_key": "face-1",
     "use_case": "avatar",
     "gender": "female",
-    "age": 30,
     "budget_limit": 4,
     "idem_key": "idem-start-1",
 }

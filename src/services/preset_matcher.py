@@ -76,7 +76,7 @@ class PresetLibrary:
     def __len__(self) -> int:
         return len(self._by_id)
 
-    def match(self, *, use_case: str, gender: str, age: int) -> Preset | None:
+    def match(self, *, use_case: str, gender: str) -> Preset | None:
         """First preset whose ``applies_to`` admits the request, else ``None``.
 
         Intentionally a simple linear filter — the seam for real ranking later.
@@ -93,9 +93,6 @@ class PresetLibrary:
                 continue
             if gender not in a.gender and "any" not in a.gender:
                 continue
-            lo, hi = a.age
-            if not lo <= age <= hi:
-                continue
             return preset
         return None
 
@@ -108,14 +105,14 @@ class PresetLibrary:
         """
         return self._by_id.get(_FALLBACK_ID)
 
-    def resolve(self, *, use_case: str, gender: str, age: int) -> Preset | None:
+    def resolve(self, *, use_case: str, gender: str) -> Preset | None:
         """Best ``applies_to`` match, else the reserved ``default`` fallback.
 
         This is the entry point the orchestration uses: a request that no curated
         preset admits resolves to the fallback rather than failing. Returns
         ``None`` only when nothing matches *and* the library ships no fallback.
         """
-        return self.match(use_case=use_case, gender=gender, age=age) or self.fallback
+        return self.match(use_case=use_case, gender=gender) or self.fallback
 
 
 def load_library(settings: Settings) -> PresetLibrary:

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 
@@ -38,14 +38,6 @@ class Slot(_Strict):
 class AppliesTo(_Strict):
     use_case: list[str]
     gender: list[str]
-    age: tuple[int, int]  # [min, max]
-
-    @model_validator(mode="after")
-    def _age_ordered(self) -> AppliesTo:
-        lo, hi = self.age
-        if lo > hi:
-            raise ValueError(f"age min {lo} > max {hi}")
-        return self
 
 
 class Generation(_Strict):
@@ -98,7 +90,8 @@ class Composition(_Strict):
 class Preset(_Strict):
     # Contract version of this shape; absent in YAML → defaults. Bump only on a
     # breaking change to the preset schema itself, not on a library content edit.
-    schema_v: int = 1
+    # v2: dropped applies_to.age — matching is use_case/gender only.
+    schema_v: int = 2
     id: str
     version: str
     applies_to: AppliesTo

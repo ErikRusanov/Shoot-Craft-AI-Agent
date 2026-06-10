@@ -10,11 +10,10 @@ id: default
 version: 1.0.0
 
 applies_to:
-  # The reserved fallback token — see the header. Wide gender/age so the fallback
+  # The reserved fallback token — see the header. Wide gender list so the fallback
   # admits anyone once the matcher has decided to fall back.
   use_case: [default]
   gender: [male, female, any]
-  age: [12, 99]
 
 identity_instruction: >-
   Preserve the exact facial identity of the person in the reference photo: the

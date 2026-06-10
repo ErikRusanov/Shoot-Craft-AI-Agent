@@ -160,7 +160,6 @@ _ROUND_TRIP_CASES: list[BaseModel] = [
         face_key="face_abc",
         use_case="resume",
         gender="female",
-        age=30,
         budget_limit=4,
         idem_key="k2",
     ),

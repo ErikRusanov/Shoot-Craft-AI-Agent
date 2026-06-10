@@ -103,7 +103,8 @@ class InsightFaceEmbedder:
         # (utils.images), so it is kept as-is here.
         x1, y1, x2, y2 = (float(v) - offset for v in face.bbox)
         # landmark_3d_68 sets pose as [pitch, yaw, roll] degrees; genderage sets
-        # gender (1=male) and age. Either model may be absent from a slim pack.
+        # gender (1=male). Either model may be absent from a slim pack. The
+        # pack's age estimate is dropped at this boundary — see DetectedFace.
         pose = face.get("pose")
         pitch, yaw, roll = (float(v) for v in pose) if pose is not None else (0.0, 0.0, 0.0)
         raw_gender = face.get("gender")
@@ -114,6 +115,5 @@ class InsightFaceEmbedder:
             pitch=pitch,
             roll=roll,
             gender=None if raw_gender is None else (Gender.MALE if raw_gender else Gender.FEMALE),
-            age=None if face.get("age") is None else int(face.age),
             embedding=np.asarray(face.normed_embedding, dtype=np.float32),
         )

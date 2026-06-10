@@ -7,7 +7,6 @@ version: 1.0.0
 applies_to:
   use_case: [avatar, profile]
   gender: [male, female, any]
-  age: [12, 99]
 
 identity_instruction: >-
   Preserve the exact facial identity of the person in the reference photo: the

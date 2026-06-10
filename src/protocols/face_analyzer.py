@@ -25,11 +25,14 @@ from schemas import Gender
 
 @dataclass(frozen=True)
 class DetectedFace:
-    """One detected face: geometry, pose, demographics, identity vector.
+    """One detected face: geometry, pose, perceived gender, identity vector.
 
     ``bbox`` is ``(x1, y1, x2, y2)`` in pixels of the source frame; pose angles
-    are degrees. ``gender`` / ``age`` are model estimates and may be ``None``
-    when the attribute model abstains.
+    are degrees. ``gender`` is a model estimate and may be ``None`` when the
+    attribute model abstains. The model's age estimate is deliberately *not*
+    surfaced: it proved wildly wrong on real photos (off by 10-30 years), and
+    the age that drives preset matching arrives via the contract from the
+    business service anyway.
     """
 
     bbox: tuple[float, float, float, float]
@@ -38,7 +41,6 @@ class DetectedFace:
     pitch: float
     roll: float
     gender: Gender | None
-    age: int | None
     embedding: NDArray[np.float32]  # L2-normalized; biometric, never logged
 
 

@@ -84,10 +84,10 @@ class FaceProfile(SchemaModel):
     gate_verdict: Verdict
     gate_reason: GateReason
     metrics: FrameMetrics
-    # Estimated by the CV attribute model; generation hints for preset matching
-    # (applies_to.gender / applies_to.age), not identity claims.
+    # Estimated by the CV attribute model; a generation hint, not an identity
+    # claim. No age anywhere: the CV estimate proved unusable on real photos,
+    # and preset matching is use_case/gender only.
     gender: Gender | None = None
-    age: int | None = None
     convergence: ConvergenceStats = Field(default_factory=ConvergenceStats)
     photo_ref: str  # object-storage key of the input photo
 

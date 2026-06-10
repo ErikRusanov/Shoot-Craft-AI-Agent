@@ -47,14 +47,13 @@ class IngestPhotoResponse(SchemaModel):
 class StartSessionRequest(SchemaModel):
     """Open a session for an accepted ``face_key``.
 
-    ``use_case`` / ``gender`` / ``age`` drive preset matching; ``budget_limit``
+    ``use_case`` / ``gender`` drive preset matching; ``budget_limit``
     is the paid-generation ceiling for this session.
     """
 
     face_key: str
     use_case: str
     gender: str
-    age: int
     budget_limit: int
     idem_key: str
 

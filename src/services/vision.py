@@ -54,7 +54,6 @@ class VisionService:
             gate_reason=gate.reason,
             metrics=metrics,
             gender=primary.gender if primary else None,
-            age=primary.age if primary else None,
             photo_ref=photo_ref,
         )
 
