@@ -11,6 +11,12 @@ letting it through risks burning the whole generation budget on a weak anchor.
 ``SOFT`` exists for generated frames (keep-best), not here. The first failing
 check names the :class:`~schemas.enums.GateReason`, ordered so the user is told
 the most fundamental problem first (no face beats blurry).
+
+The gate judges only how well the face is *rendered* — resolution, sharpness,
+exposure — never how the shot is composed. A turned head, a laugh, a tilted
+camera are the user's photo, not a defect: generation is reference-conditioned
+and the identity embedding tolerates pose. Pose angles stay in the metrics for
+observability but are deliberately not thresholded here.
 """
 
 from __future__ import annotations
@@ -27,10 +33,7 @@ class GateThresholds:
     min_side: int  # min(width, height) of the frame, px
     min_face_side: float  # min side of the primary face bbox, px
     max_secondary_face_ratio: float  # second-largest face area / primary face area
-    min_blur_var: float  # Laplacian variance on the face crop
-    max_yaw: float  # degrees, absolute
-    max_pitch: float  # degrees, absolute
-    max_roll: float  # degrees, absolute
+    min_blur_var: float  # Laplacian variance on the *denoised* face crop
     min_brightness: float  # mean luma 0..255 on the face crop
     max_brightness: float
 
@@ -71,8 +74,6 @@ class QualityGate:
             return GateReason.FACE_TOO_SMALL
         if m.blur_var < t.min_blur_var:
             return GateReason.BLURRY
-        if abs(m.yaw) > t.max_yaw or abs(m.pitch) > t.max_pitch or abs(m.roll) > t.max_roll:
-            return GateReason.EXTREME_POSE
         if not t.min_brightness <= m.brightness <= t.max_brightness:
             return GateReason.POOR_LIGHTING
         return None

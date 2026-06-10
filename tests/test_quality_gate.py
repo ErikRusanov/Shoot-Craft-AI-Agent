@@ -14,6 +14,7 @@ Three rings, by prerequisite:
 
 from __future__ import annotations
 
+import io
 from functools import cache
 from typing import Any
 
@@ -35,9 +36,6 @@ THRESHOLDS = GateThresholds(
     min_face_side=128.0,
     max_secondary_face_ratio=0.25,
     min_blur_var=50.0,
-    max_yaw=35.0,
-    max_pitch=25.0,
-    max_roll=30.0,
     min_brightness=40.0,
     max_brightness=230.0,
 )
@@ -74,6 +72,15 @@ def uniform_frame(side: int = 640, value: int = 128) -> Image.Image:
     return Image.new("RGB", (side, side), (value, value, value))
 
 
+def grainy_soft_frame(side: int = 640, *, grain_sigma: float = 8.0) -> Image.Image:
+    """A high-ISO look: soft (blurred) content under sharp sensor grain."""
+    soft = np.asarray(
+        noise_frame(side).filter(ImageFilter.GaussianBlur(radius=8)), dtype=np.float64
+    )
+    grain = np.random.default_rng(3).normal(0.0, grain_sigma, soft.shape)
+    return Image.fromarray(np.clip(soft + grain, 0, 255).astype(np.uint8), mode="RGB")
+
+
 def detected_face(*, side: int = 640, **overrides: Any) -> DetectedFace:
     """A clean centered face detection covering 25% of a ``side``-px frame."""
     quarter = side // 4
@@ -107,9 +114,6 @@ def test_good_metrics_pass() -> None:
         ({"width": 200, "height": 640}, GateReason.LOW_RESOLUTION),
         ({"face_side": 64.0}, GateReason.FACE_TOO_SMALL),
         ({"blur_var": 10.0}, GateReason.BLURRY),
-        ({"yaw": 80.0}, GateReason.EXTREME_POSE),
-        ({"pitch": -40.0}, GateReason.EXTREME_POSE),
-        ({"roll": 45.0}, GateReason.EXTREME_POSE),
         ({"brightness": 15.0}, GateReason.POOR_LIGHTING),
         ({"brightness": 250.0}, GateReason.POOR_LIGHTING),
     ],
@@ -118,6 +122,13 @@ def test_each_threshold_names_its_reason(overrides: dict[str, Any], reason: Gate
     result = GATE.evaluate(make_metrics(**overrides))
     assert result.verdict is Verdict.BELOW_FLOOR
     assert result.reason is reason
+
+
+def test_pose_is_composition_not_a_quality_problem() -> None:
+    # A turned/tilted head is the user's photo, not a rendering defect — the
+    # gate judges only how well the face is rendered.
+    result = GATE.evaluate(make_metrics(yaw=80.0, pitch=-45.0, roll=50.0))
+    assert (result.verdict, result.reason) == (Verdict.PASSED, GateReason.OK)
 
 
 def test_background_bystanders_do_not_fail_the_gate() -> None:
@@ -149,6 +160,18 @@ def test_programmatic_blur_collapses_laplacian_variance() -> None:
     assert sharp_var > THRESHOLDS.min_blur_var
     assert blurred_var < THRESHOLDS.min_blur_var
     assert blurred_var < sharp_var / 10
+
+
+def test_sensor_grain_does_not_fake_sharpness() -> None:
+    # Grain is pure high frequency: on the raw image the Laplacian variance of
+    # a soft-but-noisy frame reads "sharp". The median prefilter is what lets
+    # the gate see through it — this pins that, guarding the bad_qual.png case
+    # without needing the fixture.
+    frame = grainy_soft_frame()
+    raw_var = images.laplacian_variance(images.grayscale(frame))
+    denoised_var = images.laplacian_variance(images.grayscale(images.denoise_median(frame)))
+    assert raw_var > THRESHOLDS.min_blur_var  # the lie
+    assert denoised_var < THRESHOLDS.min_blur_var  # the truth
 
 
 # --- ring 2: vision over a scripted analyzer (no weights, never skipped) -----
@@ -211,6 +234,16 @@ async def test_programmatically_blurred_frame_fails_blurry() -> None:
     assert profile.gate_reason is GateReason.BLURRY
 
 
+async def test_grainy_soft_frame_fails_blurry() -> None:
+    # PNG, not JPEG: lossy encoding would smear the very grain this case is about.
+    buf = io.BytesIO()
+    grainy_soft_frame().save(buf, format="PNG")
+    vision = make_vision(ScriptedFaceAnalyzer([detected_face()]))
+    profile = await vision.build_face_profile(buf.getvalue(), face_key="f-grain", photo_ref="ref")
+    assert profile.gate_verdict is Verdict.BELOW_FLOOR
+    assert profile.gate_reason is GateReason.BLURRY
+
+
 async def test_face_profile_is_reused_across_sessions() -> None:
     # Session one builds the profile and stores it under face_key; session two
     # must find the identical profile without triggering a second analysis.
@@ -235,10 +268,7 @@ REAL_THRESHOLDS = GateThresholds(
     min_side=512,
     min_face_side=128.0,
     max_secondary_face_ratio=0.25,
-    min_blur_var=60.0,
-    max_yaw=35.0,
-    max_pitch=25.0,
-    max_roll=30.0,
+    min_blur_var=80.0,
     min_brightness=50.0,
     max_brightness=230.0,
 )
@@ -271,6 +301,26 @@ async def test_real_photo_builds_a_passing_profile() -> None:
     assert len(profile.embedding) == 512
     assert profile.gender is not None
     assert profile.age is not None and 0 < profile.age < 100
+
+
+async def test_real_turned_face_passes_the_gate() -> None:
+    # face_b is a ~40°-turned head: composition, not a defect — must pass.
+    vision = _real_vision()
+    data = fixtures.require_fixture(fixtures.FACE_B)
+    profile = await vision.build_face_profile(data, face_key="fixture-b", photo_ref="ref-b")
+
+    assert profile.gate_verdict is Verdict.PASSED
+    assert abs(profile.metrics.yaw) > 25  # the premise: the head really is turned
+
+
+async def test_real_noisy_dim_photo_fails_the_gate() -> None:
+    # The canonical "bad rendering" fixture: high-ISO grain over a soft face.
+    vision = _real_vision()
+    data = fixtures.require_fixture(fixtures.IMAGES_DIR / "bad_qual.png")
+    profile = await vision.build_face_profile(data, face_key="fixture-bad", photo_ref="ref-bad")
+
+    assert profile.gate_verdict is Verdict.BELOW_FLOOR
+    assert profile.gate_reason is GateReason.BLURRY
 
 
 async def test_real_photo_blurred_fails_the_gate() -> None:

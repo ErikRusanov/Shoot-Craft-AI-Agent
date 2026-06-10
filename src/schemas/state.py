@@ -42,7 +42,12 @@ class FrameMetrics(StrictModel):
     # faces. Distinguishes a comparable second face (ambiguous identity) from
     # background passers-by, which are normal and must not fail the gate.
     secondary_face_ratio: float = 0.0
-    blur_var: float  # variance of the Laplacian; higher = sharper
+    # Variance of the Laplacian on the median-denoised face crop; higher =
+    # sharper. Denoised, because sensor grain reads as high frequency and would
+    # let a noisy-but-soft face pass for sharp.
+    blur_var: float
+    # Pose is observability only — never gated: a turned head is the user's
+    # composition, not a rendering defect.
     yaw: float
     pitch: float
     roll: float

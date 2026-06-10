@@ -68,10 +68,9 @@ class Settings(BaseSettings):
     # A second face only fails the gate when comparable to the primary;
     # background passers-by sit far below this.
     gate_max_secondary_face_ratio: float = 0.25  # secondary bbox area / primary bbox area
-    gate_min_blur_var: float = 60.0  # Laplacian variance on the face crop
-    gate_max_yaw: float = 35.0  # degrees, absolute
-    gate_max_pitch: float = 25.0  # degrees, absolute
-    gate_max_roll: float = 30.0  # degrees, absolute
+    # On the *denoised* face crop (see FrameMetrics.blur_var). Calibrated on
+    # real photos: a good sharp face measures ~150+, a noisy pub shot ~57.
+    gate_min_blur_var: float = 80.0
     gate_min_brightness: float = 50.0  # mean luma 0..255 on the face crop
     gate_max_brightness: float = 230.0
 

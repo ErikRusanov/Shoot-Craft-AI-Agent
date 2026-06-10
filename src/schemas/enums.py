@@ -73,7 +73,9 @@ class GateReason(StrEnum):
     """Why the input-photo quality gate produced its verdict.
 
     ``ok`` accompanies a pass; the rest explain a soft/below-floor outcome so the
-    business service can tell the user what to re-shoot.
+    business service can tell the user what to re-shoot. Every reason is about
+    how well the face is *rendered* (or whose face to anchor) — composition
+    choices like pose or expression are deliberately not gate reasons.
     """
 
     OK = "ok"
@@ -83,5 +85,4 @@ class GateReason(StrEnum):
     LOW_RESOLUTION = "low_resolution"
     BLURRY = "blurry"
     OCCLUDED = "occluded"
-    EXTREME_POSE = "extreme_pose"
     POOR_LIGHTING = "poor_lighting"

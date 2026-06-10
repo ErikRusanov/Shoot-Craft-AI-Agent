@@ -74,12 +74,16 @@ class VisionService:
                 secondary_face_ratio = (w2 * h2) / (w * h)
 
         gray = images.grayscale(region)
+        # Sharpness on the denoised crop (grain reads as "sharp" otherwise);
+        # brightness on the raw one (denoising doesn't move the mean, but the
+        # exposure number should describe the actual pixels).
+        denoised = images.grayscale(images.denoise_median(region))
         return FrameMetrics(
             face_count=len(faces),
             face_area_ratio=face_area_ratio,
             face_side=face_side,
             secondary_face_ratio=secondary_face_ratio,
-            blur_var=images.laplacian_variance(gray),
+            blur_var=images.laplacian_variance(denoised),
             yaw=primary.yaw if primary else 0.0,
             pitch=primary.pitch if primary else 0.0,
             roll=primary.roll if primary else 0.0,

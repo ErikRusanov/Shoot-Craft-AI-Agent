@@ -12,7 +12,7 @@ import io
 
 import numpy as np
 from numpy.typing import NDArray
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageFilter, UnidentifiedImageError
 
 Bbox = tuple[float, float, float, float]  # (x1, y1, x2, y2) in pixels
 
@@ -69,6 +69,16 @@ def resize_max_side(img: Image.Image, max_side: int) -> Image.Image:
 def grayscale(img: Image.Image) -> NDArray[np.float64]:
     """Luma plane as a float array in 0..255."""
     return np.asarray(img.convert("L"), dtype=np.float64)
+
+
+def denoise_median(img: Image.Image, *, size: int = 3) -> Image.Image:
+    """A small median filter — kills sensor grain, keeps true edges.
+
+    Sharpness must be measured on this, not the raw image: high-ISO noise is
+    pure high frequency, so on a noisy-but-soft photo the raw Laplacian
+    variance reads "sharp" while the face itself is mush.
+    """
+    return img.filter(ImageFilter.MedianFilter(size))
 
 
 def laplacian_variance(gray: NDArray[np.float64]) -> float:
