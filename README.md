@@ -1,52 +1,143 @@
-# Shoot-Craft-AI-Agent
-AI photoshoot agent — your photos in, studio-quality shots with your real face out. No prompting needed
+# Shoot Craft AI Agent
 
-## Presets & the private library
+**AI photoshoot core** — takes a user's reference photo, runs a face-preserving generation loop, and delivers studio-quality shots with their real identity. No prompting from the user.
 
-The curated preset library is the moat and lives in a **separate** repo,
-`photocore-presets` (`../presets` locally). This public core ships only the
-`Preset` **schema** (`src/schemas/presets.py`, the canonical contract) and a few
-MIT **demo** presets (`presets/examples/`). The core has **no dependency** on the
-private package — it discovers presets at runtime via config.
+![Python 3.14](https://img.shields.io/badge/python-3.14-blue) ![License AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)
 
-`services/preset_matcher.py` resolves the source from `PRESET_SOURCE`:
+This is the autonomous worker. It has no UI and never talks to a human directly — a **business service** drives it over HTTP and receives results via SSE. See [docs/business-flow.md](docs/business-flow.md) for the end-to-end flow.
 
-| `PRESET_SOURCE` | Reads from | `library_version` | Use |
-| --------------- | ---------- | ----------------- | --- |
-| `examples` (default) | `presets/examples/` | `examples` | public core runs out of the box |
-| `path` | `PRESET_LIBRARY_PATH` dir | `path:<dir>` (not reproducible) | local dev against `../presets/src/library` |
-| `package` | installed `PRESET_PACKAGE` | the dist version (reproducible) | prod / private image |
+---
 
-### Local dev against the private library
+## Architecture
 
-```bash
-# Option A — read the sibling checkout directly (no install, edits live):
-#   in .env:
-#     PRESET_SOURCE=path
-#     PRESET_LIBRARY_PATH=../presets/src/library
-
-# Option B — exercise the real prod (package) path:
-make presets-dev          # editable-install ../presets into this venv
-#   in .env: PRESET_SOURCE=package
-#   NOTE: `make sync` prunes the editable install — re-run `make presets-dev` after.
+```
+┌─────────────────────────────────────┐
+│  FastAPI  ·  SSE stream             │  src/api/
+├─────────────────────────────────────┤
+│  LangGraph FSM  ·  8-state machine  │  src/graph/
+├─────────────────────────────────────┤
+│  Domain services  (no I/O)          │  src/services/
+├─────────────────────────────────────┤
+│  Protocol ports  (interfaces)       │  src/protocols/
+├───────────┬─────────┬───────────────┤
+│ Generator │ Storage │ Face CV       │  src/services/connectors/
+│ OpenRouter│ S3/local│ InsightFace   │
+└───────────┴─────────┴───────────────┘
+         Redis  (state + events)
 ```
 
-### Docker
+Full diagram → [docs/architecture.md](docs/architecture.md)  
+State machine → [docs/fsm.md](docs/fsm.md)
 
-Two images, mirroring the boundary:
+---
 
-- **Public base** (`./Dockerfile`) — core + demo presets, `PRESET_SOURCE=examples`.
-  ```bash
-  docker build -t photocore-base:latest .
-  ```
-- **Private** (`../presets/Dockerfile`) — builds the library wheel from source,
-  then installs it onto the base; `library_version` = the wheel version.
-  ```bash
-  docker build -t photocore-private:0.2.0 \
-      --build-arg BASE_IMAGE=photocore-base:latest ../presets
-  ```
-  (`make presets-build` is the standalone "produce a wheel artifact" target, for
-  publishing to a private index or CI — not needed for the Docker build above.)
+## Quick start
 
-The private library never enters the public repo or the public image; it is
-layered on only in the private image.
+### Prerequisites
+
+- [uv](https://docs.astral.sh/uv/) (Python package manager)
+- Docker (for Redis; or bring your own)
+
+### Dev — fake connectors, no API keys or model weights needed
+
+```bash
+make setup          # install uv, sync deps, create .env, wire git hooks
+make infra          # start Redis in Docker
+make run            # start the API server on :8000
+```
+
+Or run the full stack (app + Redis) in containers:
+
+```bash
+make up
+```
+
+### Production / real connectors
+
+Set the following in `.env` (see `.env.example` for all options):
+
+| Variable | Description |
+|----------|-------------|
+| `OPENROUTER_API_KEY` | OpenRouter key for the generation model |
+| `REDIS_URL` | Redis connection string |
+| `OBJECT_STORAGE` | `s3` or `local` (default) |
+| `PRESET_SOURCE` | `package` (prod), `path` (dev), `examples` (default) |
+
+```bash
+make models         # download InsightFace weights to ./.models
+make run
+```
+
+To use the private preset library locally:
+
+```bash
+# Option A — read the sibling checkout directly (edits are live):
+#   PRESET_SOURCE=path  PRESET_LIBRARY_PATH=../presets/src/library  in .env
+
+# Option B — install as a package (mirrors prod):
+make presets-dev    # editable-install ../presets; set PRESET_SOURCE=package
+```
+
+---
+
+## API
+
+Seven endpoints; every mutation is idempotent via `idem_key`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/faces/{face_key}` | Ingest photo, run quality gate |
+| `POST` | `/v1/sessions/{session_key}` | Start session |
+| `POST` | `/v1/sessions/{session_key}/input` | Submit free-form scene answer |
+| `POST` | `/v1/sessions/{session_key}/approve` | Approve or reject cost estimate |
+| `POST` | `/v1/sessions/{session_key}/cancel` | Cancel session |
+| `GET` | `/v1/sessions/{session_key}` | Read state snapshot |
+| `GET` | `/v1/sessions/{session_key}/events` | SSE event stream |
+
+Full reference with request/response shapes and a sequence diagram → [docs/api.md](docs/api.md)
+
+---
+
+## Configuration
+
+All settings live in `.env` (template: `.env.example`). Key groups:
+
+- **Redis** — `REDIS_URL`, `FACE_TTL_SECONDS`, `SESSION_TTL_SECONDS`
+- **Generation** — `OPENROUTER_API_KEY`, `GENERATION_MODEL`, `MAX_ITERATIONS`
+- **Face CV** — `INSIGHTFACE_MODEL`, `INSIGHTFACE_ROOT`, `FACE_MATCH_THRESHOLD`
+- **Storage** — `OBJECT_STORAGE`, `S3_BUCKET`, `LOCAL_STORAGE_PATH`
+- **Limits** — `MAX_CONCURRENT_GENERATIONS`, `SESSION_WALL_CLOCK_SECONDS`, `MAX_PHOTO_BYTES`
+- **Fake connectors** — `FAKE_CONNECTORS=true` (no external deps, for dev/CI)
+
+---
+
+## Preset library
+
+The preset library is the product moat and lives in a **separate private repo** (`photocore-presets`). This public core ships only:
+
+- `src/schemas/presets.py` — the canonical `Preset` schema
+- `presets/examples/` — 2–3 MIT-licensed demo presets for tests and local dev
+
+The private library is loaded at runtime via `PRESET_SOURCE`. A production image layers it on via a second Dockerfile in the presets repo; see the Docker section in the original README for the two-image build pattern.
+
+---
+
+## Development
+
+```bash
+make help           # list all targets
+make lint           # ruff check + format check
+make fmt            # auto-format
+make type           # mypy strict (src + tests)
+make test           # pytest
+make test ARGS=tests/test_x.py::test_name   # single test
+make load           # parallel load test against a running server
+```
+
+Commit prefix convention: `(feat):`, `(fix):`, `(chore):`, `(refactor):`, `(docs):`, `(test):`, `(perf):`.
+
+---
+
+## License
+
+[AGPL-3.0](LICENSE)
