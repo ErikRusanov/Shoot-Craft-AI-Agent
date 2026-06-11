@@ -58,7 +58,7 @@ async def test_returns_decodable_image_and_request_id(
     )
 
     assert isinstance(result, GeneratedImage)
-    image_bytes, request_id = result  # must unpack as a 2-tuple
+    image_bytes, request_id, _usage = result  # (bytes, request_id, usage)
     assert isinstance(request_id, str) and request_id
     # Bytes must be a real image the rest of the pipeline can re-open.
     Image.open(io.BytesIO(image_bytes)).verify()

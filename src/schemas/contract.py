@@ -23,7 +23,11 @@ start, 503 when the state store is unreachable.
 
 from __future__ import annotations
 
-from schemas.base import SchemaModel
+from decimal import Decimal
+
+from pydantic import Field
+
+from schemas.base import SchemaModel, StrictModel
 from schemas.enums import FsmState, GateReason, Verdict
 from schemas.state import FrameMetrics, SessionState
 
@@ -52,15 +56,56 @@ class IngestPhotoResponse(SchemaModel):
 class StartSessionRequest(SchemaModel):
     """Open a session for an accepted ``face_key``.
 
-    ``use_case`` / ``gender`` drive preset matching; ``budget_limit``
-    is the paid-generation ceiling for this session.
+    Preset matching keys on ``use_case`` only — the face comes from the
+    reference, so neither gender nor any demographic is a contract input. Both
+    ``use_case`` and ``brief`` are optional: the business service often has only
+    the user's free-text request. When ``use_case`` is absent the core classifies
+    one from ``brief`` (falling back to the reserved ``default`` preset, whose
+    free-form scene is filled from ``brief``). ``budget_limit`` is the USD ceiling
+    for this session (pay-as-you-go).
     """
 
+    schema_v: int = 2
     face_key: str
-    use_case: str
-    gender: str
-    budget_limit: int
+    use_case: str | None = None
+    brief: str | None = None  # the user's own free-text request
+    budget_limit: Decimal  # USD ceiling for this session (pay-as-you-go)
     idem_key: str
+
+
+class PresetAsk(StrictModel):
+    """The clarifying question a preset asks (its ``ask:true`` slot).
+
+    ``options`` lists enum choices, ``None`` for a free-form slot (the fallback
+    preset's scene). ``default`` is the slot's default when it declares one.
+    """
+
+    slot: str
+    options: list[str] | None = None
+    default: str | None = None
+
+
+class PresetSummary(StrictModel):
+    """One preset as the catalog advertises it — no frozen prompt content.
+
+    ``use_case_tokens`` are the matcher tokens the business service passes back as
+    ``use_case``; the reserved ``default`` fallback is flagged (``is_fallback``)
+    and is not offered as a choice — it is the implicit fall-through.
+    """
+
+    id: str
+    version: str
+    label: str | None = None
+    use_case_tokens: list[str]
+    is_fallback: bool = False
+    asks: list[PresetAsk] = Field(default_factory=list)
+
+
+class PresetCatalog(SchemaModel):
+    """The ``GET /v1/presets`` response: the curated catalog plus library version."""
+
+    presets: list[PresetSummary]
+    library_version: str
 
 
 class StartSessionResponse(SchemaModel):
@@ -114,8 +159,11 @@ class SessionSnapshot(SchemaModel):
 
     Wraps :class:`~schemas.state.SessionState` (safe to expose — the biometric
     embedding lives on the separately keyed ``FaceProfile``) plus the derived
-    spend counter the caller would otherwise compute from ``iterations``.
+    spend the caller would otherwise compute from ``iterations``:
+    ``generations_spent`` (charged frames) and ``cost_spent`` (real dollars
+    billed, generations plus auxiliary LLM calls).
     """
 
     state: SessionState
     generations_spent: int
+    cost_spent: Decimal = Decimal("0")

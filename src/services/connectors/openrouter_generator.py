@@ -24,9 +24,9 @@ import binascii
 from collections.abc import Sequence
 from typing import Any
 
-from protocols.generator import GeneratedImage
+from protocols.generator import GeneratedImage, GenerationRefusedError
 from schemas import Generation
-from services.connectors.openrouter_client import OpenRouterClient
+from services.connectors.openrouter_client import OpenRouterClient, parse_usage
 
 # OpenRouter's per-part detail vocabulary; the preset's face_media_resolution
 # must be one of these or the request is a config bug, failed before any spend.
@@ -38,11 +38,13 @@ _MAGIC_MIME: tuple[tuple[bytes, str], ...] = (
 )
 
 
-class NoImageGeneratedError(RuntimeError):
+class NoImageGeneratedError(GenerationRefusedError):
     """Upstream answered 2xx but returned no usable image.
 
     Possibly a refusal, possibly already paid — never auto-retried (see module
     docstring); the caller decides whether another attempt is worth its price.
+    A :class:`~protocols.generator.GenerationRefusedError`, so it carries the
+    billed ``usage`` and the loop settles its spend rather than refunding.
     """
 
 
@@ -121,10 +123,17 @@ class OpenRouterImageGenerator:
             }
         )
 
-        image = _extract_image(body)
-        request_id = str(body.get("id") or "")
-        if not request_id:
-            # An image we cannot trace back upstream is unusable: Iteration
-            # records the provider id, and keep-best must stay auditable.
-            raise NoImageGeneratedError("the response carried an image but no request id")
-        return GeneratedImage(image, request_id)
+        # Parse usage first: a no-image response is still billed, and the refusal
+        # error must carry the cost so the loop settles rather than refunds.
+        usage = parse_usage(body)
+        try:
+            image = _extract_image(body)
+            request_id = str(body.get("id") or "")
+            if not request_id:
+                # An image we cannot trace back upstream is unusable: Iteration
+                # records the provider id, and keep-best must stay auditable.
+                raise NoImageGeneratedError("the response carried an image but no request id")
+        except NoImageGeneratedError as exc:
+            exc.usage = usage
+            raise
+        return GeneratedImage(image, request_id, usage)

@@ -12,17 +12,27 @@ filler fails loudly instead of leaking into the frozen blocks.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import NamedTuple, Protocol, runtime_checkable
 
-from schemas import FrameMetrics, Preset
+from protocols.budget import BudgetMeter
+from schemas import FrameMetrics, Preset, ProviderUsage
 
 
 class SlotFill(NamedTuple):
-    """Resolved slot values plus the one sanctioned free-text extension."""
+    """Resolved slot values, the free-text extension, and what the call billed.
+
+    ``cost`` is the dollars an LLM-backed filler settled (0 for the deterministic
+    fallback, or when the budget refused the call and it degraded); ``usage`` is
+    the provider's billing detail. The orchestration records these so the dollar
+    budget accounts for the slot-fill spend alongside generations.
+    """
 
     slots: dict[str, str]
     # Appended after the prompt structure, never inside it; empty means none.
     addendum: str = ""
+    usage: ProviderUsage | None = None
+    cost: Decimal = Decimal("0")
 
 
 @runtime_checkable
@@ -35,6 +45,7 @@ class SlotFiller(Protocol):
         preset: Preset,
         user_answer: str | None,
         photo_analysis: FrameMetrics | None,
+        meter: BudgetMeter | None = None,
     ) -> SlotFill:
         """Return a value for **every** slot in ``preset.slots``.
 
@@ -42,5 +53,10 @@ class SlotFiller(Protocol):
         question (``None`` when the user has not answered); ``photo_analysis``
         carries the measured input-frame metrics when available. A slot that
         declares an ``enum`` must resolve to one of its members.
+
+        ``meter`` is the session budget: an LLM-backed filler reserves a slot
+        through it before its paid call and settles afterwards; when the budget
+        refuses (or ``meter`` is ``None``) it degrades to a free deterministic
+        fill rather than failing the session.
         """
         ...

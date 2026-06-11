@@ -91,7 +91,6 @@ async def drive_session(
                 json={
                     "face_key": face_key,
                     "use_case": "avatar",
-                    "gender": "female",
                     "budget_limit": budget,
                     "idem_key": f"{session_key}-start",
                 },

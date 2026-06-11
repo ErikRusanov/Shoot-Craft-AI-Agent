@@ -23,6 +23,7 @@ both squarely an application concern.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -49,9 +50,11 @@ from protocols import (
     ObjectStorage,
     SlotFiller,
     StateStore,
+    UseCaseClassifier,
 )
 from schemas import FailedEvent, FailureCode, FsmState, NeedInputEvent, SessionState
 from services.budget import BudgetService
+from services.classifier import TokenOverlapClassifier
 from services.connectors import (
     FakeFaceEngine,
     FakeImageGenerator,
@@ -62,6 +65,7 @@ from services.connectors import (
     OpenRouterClient,
     OpenRouterImageGenerator,
     OpenRouterSlotFiller,
+    OpenRouterUseCaseClassifier,
     RedisEventBus,
     RedisStateStore,
     S3ObjectStorage,
@@ -71,10 +75,12 @@ from services.facecheck import FaceCheckService
 from services.generation_loop import GenerationLoop
 from services.idempotency import IdempotencyService
 from services.preset_matcher import PresetLibrary, load_library
+from services.pricing import PricingTable
 from services.quality_gate import GateThresholds, QualityGate
 from services.slot_filler import DefaultSlotFiller
 from services.telemetry import Telemetry
 from services.vision import VisionService
+from utils.money import to_micro
 
 log = structlog.get_logger(__name__)
 
@@ -87,17 +93,40 @@ _WALL_CLOCK_REASON = "session run exceeded the wall-clock limit"
 _CANCELLED_REASON = "cancelled by the caller"
 
 
-def _accounting(session: SessionState | None, unit_price: Decimal) -> dict[str, Any]:
+def _accounting(session: SessionState | None) -> dict[str, Any]:
     """Spend accounting for a terminal event, from the session record (or zeros
     when there is no session to read)."""
     if session is None:
-        return {"iterations_used": 0, "generations_spent": 0, "actual_cost": Decimal("0")}
-    generations_spent = sum(1 for it in session.iterations if it.charged)
+        return {"iterations_used": 0, "generations_spent": 0, "cost_spent": Decimal("0")}
     return {
         "iterations_used": len(session.iterations),
-        "generations_spent": generations_spent,
-        "actual_cost": unit_price * generations_spent,
+        "generations_spent": session.generations_spent(),
+        "cost_spent": session.cost_spent(),
     }
+
+
+def build_pricing(settings: Settings) -> PricingTable:
+    """The pricing table for this process: built-in rates plus startup overrides.
+
+    Fails fast (here, not mid-session) if the configured generation or slot-filler
+    model has no rate after overrides are applied.
+    """
+    pricing = PricingTable.default(
+        generation_model=settings.generation_model, lite_model=settings.slot_filler_model
+    )
+    if settings.pricing_overrides_json:
+        overrides = json.loads(settings.pricing_overrides_json)
+        pricing = PricingTable.model_validate({**pricing.model_dump(mode="json"), **overrides})
+    # The classifier shares the lite model's rate by default; if configured to a
+    # different model with no explicit rate, alias it to the slot filler's.
+    if settings.classifier_model not in pricing.model_rates:
+        pricing.model_rates[settings.classifier_model] = pricing.rate_for(
+            settings.slot_filler_model
+        )
+    pricing.rate_for(settings.generation_model)
+    pricing.rate_for(settings.slot_filler_model)
+    pricing.rate_for(settings.classifier_model)
+    return pricing
 
 
 class SessionRunner:
@@ -131,7 +160,6 @@ class SessionRunner:
         *,
         wall_clock_seconds: int,
         session_ttl_seconds: int,
-        unit_price: Decimal,
     ) -> None:
         self._graph = graph
         self._bus = bus
@@ -139,21 +167,30 @@ class SessionRunner:
         self._telemetry = telemetry
         self._wall_clock = wall_clock_seconds
         self._session_ttl = session_ttl_seconds
-        self._unit_price = unit_price
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def start(
-        self, session_key: str, *, face_key: str, use_case: str, gender: str, budget_limit: int
+        self,
+        session_key: str,
+        *,
+        face_key: str,
+        use_case: str,
+        brief: str,
+        budget_limit: Decimal,
     ) -> bool:
-        """Begin a fresh run; ``False`` when a run is already in flight."""
+        """Begin a fresh run; ``False`` when a run is already in flight.
+
+        ``budget_limit`` is USD; the checkpoint carries it as micro-USD (Decimal
+        does not survive the checkpointer's serde).
+        """
         return await self._spawn(
             session_key,
             initial_state(
                 session_key=session_key,
                 face_key=face_key,
                 use_case=use_case,
-                gender=gender,
-                budget_limit=budget_limit,
+                brief=brief,
+                budget_limit=to_micro(budget_limit),
             ),
         )
 
@@ -182,7 +219,7 @@ class SessionRunner:
             FailedEvent(
                 code=FailureCode.CANCELLED,
                 reason=_CANCELLED_REASON,
-                **_accounting(session, self._unit_price),
+                **_accounting(session),
             ),
         )
 
@@ -261,7 +298,7 @@ class SessionRunner:
             )
         await self._bus.publish(
             session_key,
-            FailedEvent(code=code, reason=reason, **_accounting(session, self._unit_price)),
+            FailedEvent(code=code, reason=reason, **_accounting(session)),
         )
 
     async def _emit_telemetry(self, session_key: str, *, failure_reason: str | None) -> None:
@@ -366,11 +403,13 @@ def build_container(settings: Settings) -> Container:
     openrouter: OpenRouterClient | None = None
     generator: ImageGenerator
     slot_filler: SlotFiller
+    classifier: UseCaseClassifier
     analyzer: FaceAnalyzer
     embedder: Embedder
     if settings.fake_connectors:
         generator = FakeImageGenerator()
         slot_filler = DefaultSlotFiller()
+        classifier = TokenOverlapClassifier()
         face_engine = FakeFaceEngine()
         analyzer, embedder = face_engine, face_engine
     else:
@@ -382,6 +421,7 @@ def build_container(settings: Settings) -> Container:
         )
         generator = OpenRouterImageGenerator(openrouter, model=settings.generation_model)
         slot_filler = OpenRouterSlotFiller(openrouter, model=settings.slot_filler_model)
+        classifier = OpenRouterUseCaseClassifier(openrouter, model=settings.classifier_model)
         # One InsightFace pack serves both ports from a single inference pass.
         insight = InsightFaceEmbedder(
             model_pack=settings.insightface_model,
@@ -396,6 +436,8 @@ def build_container(settings: Settings) -> Container:
 
     vision = VisionService(analyzer, QualityGate(_gate_thresholds(settings)))
     library = load_library(settings)
+    pricing = build_pricing(settings)
+    budget = BudgetService(store, pricing)
     services = GraphServices(
         store=store,
         storage=storage,
@@ -403,20 +445,24 @@ def build_container(settings: Settings) -> Container:
         vision=vision,
         library=library,
         slot_filler=slot_filler,
+        classifier=classifier,
         generation_loop=GenerationLoop(
             store=store,
             storage=storage,
             bus=bus,
             generator=generator,
             facecheck=FaceCheckService(embedder),
-            budget=BudgetService(store),
+            budget=budget,
+            pricing=pricing,
             idempotency=IdempotencyService(store),
             session_ttl_seconds=settings.session_ttl_seconds,
             face_ttl_seconds=settings.face_ttl_seconds,
             max_iterations=settings.max_iterations,
-            unit_price=settings.generation_unit_price,
+            generation_model=settings.generation_model,
         ),
-        unit_price=settings.generation_unit_price,
+        budget=budget,
+        pricing=pricing,
+        generation_model=settings.generation_model,
         default_expected_generations=settings.default_expected_generations,
         session_ttl_seconds=settings.session_ttl_seconds,
         face_ttl_seconds=settings.face_ttl_seconds,
@@ -440,9 +486,8 @@ def build_container(settings: Settings) -> Container:
         graph,
         bus,
         store,
-        Telemetry(unit_price=settings.generation_unit_price),
+        Telemetry(),
         wall_clock_seconds=settings.session_wall_clock_seconds,
         session_ttl_seconds=settings.session_ttl_seconds,
-        unit_price=settings.generation_unit_price,
     )
     return container

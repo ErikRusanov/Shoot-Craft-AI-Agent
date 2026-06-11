@@ -6,7 +6,7 @@ Key layout, all TTL-bound — biometrics and session state are transient:
 - ``sess:{session_key}`` — SessionState JSON
 - ``lock:{key}``        — holder token (``SET NX PX``; release via Lua fence)
 - ``idemp:{key}``       — stored mutation result (``SET NX``)
-- ``budget:{session_key}`` — paid-generation counter (Lua check-and-incr)
+- ``budget:{session_key}`` — micro-USD spent counter (Lua reserve/adjust)
 
 The client must be created with ``decode_responses=False`` (the default):
 idempotency values are opaque bytes. Scripts run via ``register_script``, so a
@@ -18,7 +18,7 @@ from __future__ import annotations
 from redis.asyncio import Redis
 
 from schemas import FaceProfile, SessionState
-from utils.lua import BUDGET_CHECK_AND_INCR, RELEASE_LOCK_IF_HELD
+from utils.lua import BUDGET_ADJUST, BUDGET_RESERVE, RELEASE_LOCK_IF_HELD
 
 
 class RedisStateStore:
@@ -27,7 +27,8 @@ class RedisStateStore:
     def __init__(self, client: Redis) -> None:
         self._r = client
         self._release_lock = client.register_script(RELEASE_LOCK_IF_HELD)
-        self._budget_incr = client.register_script(BUDGET_CHECK_AND_INCR)
+        self._budget_reserve = client.register_script(BUDGET_RESERVE)
+        self._budget_adjust = client.register_script(BUDGET_ADJUST)
 
     # --- face profile ---
     async def get_face(self, face_key: str) -> FaceProfile | None:
@@ -65,9 +66,17 @@ class RedisStateStore:
         res = await self._r.set(f"idemp:{key}", value, nx=True, ex=ttl_seconds)
         return bool(res)
 
-    # --- budget (atomic via Lua) ---
-    async def check_and_incr_budget(
-        self, session_key: str, *, limit: int, ttl_seconds: int
+    # --- budget (reserve/settle, atomic via Lua) ---
+    async def budget_reserve(
+        self, session_key: str, *, estimate_micro: int, limit_micro: int, ttl_seconds: int
     ) -> bool:
-        res = await self._budget_incr(keys=[f"budget:{session_key}"], args=[limit, ttl_seconds])
+        res = await self._budget_reserve(
+            keys=[f"budget:{session_key}"], args=[estimate_micro, limit_micro, ttl_seconds]
+        )
         return bool(res)
+
+    async def budget_adjust(self, session_key: str, *, delta_micro: int, ttl_seconds: int) -> int:
+        res = await self._budget_adjust(
+            keys=[f"budget:{session_key}"], args=[delta_micro, ttl_seconds]
+        )
+        return int(res)

@@ -2,10 +2,12 @@
 
 ::
 
-    analyze → quality_gate ─→ ask ⇄ match_fill → plan → approve → generate → done
-                    │           │        │                  │          │
-                    └───────────┴────────┴──── fail ────────┘         END
+    analyze → quality_gate → classify → ask ⇄ match_fill → plan → approve → generate → done
+                    │                    │        │                  │          │
+                    └────────────────────┴────────┴──── fail ────────┘         END
 
+``classify`` derives ``use_case`` from the user's brief when the caller gave
+none (a budgeted LLM call with a deterministic fallback — it never fails).
 ``ask`` and ``approve`` pause on ``interrupt()``; ``match_fill`` loops back to
 ``ask`` when a free-form answer is rejected. ``generate`` routes to ``done``
 on a delivered result and straight to END on a loop failure (the loop already
@@ -60,7 +62,8 @@ def build_graph(
 
     graph.add_edge(START, "analyze")
     graph.add_edge("analyze", "quality_gate")
-    graph.add_conditional_edges("quality_gate", _route_failure("ask"), ["fail", "ask"])
+    graph.add_conditional_edges("quality_gate", _route_failure("classify"), ["fail", "classify"])
+    graph.add_edge("classify", "ask")
     graph.add_conditional_edges("ask", _route_failure("match_fill"), ["fail", "match_fill"])
     graph.add_conditional_edges("match_fill", _route_match_fill, ["fail", "ask", "plan"])
     graph.add_edge("plan", "approve")

@@ -7,7 +7,6 @@ Single source of runtime config, loaded from the environment (and an optional
 Secrets and connection details only — no contract lives here (that is `schemas/`).
 """
 
-from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -64,6 +63,10 @@ class Settings(BaseSettings):
     # Cheap GA text model for the LLM slot filler (structured output, $0.25/M
     # in as of 2026-06); falls back to DefaultSlotFiller on any misbehavior.
     slot_filler_model: str = "google/gemini-3.1-flash-lite"
+    # Cheap text model that maps the user's free-text brief onto a use_case
+    # token; falls back to deterministic token-overlap on any misbehavior. Same
+    # model as the slot filler by default, so the pricing table already covers it.
+    classifier_model: str = "google/gemini-3.1-flash-lite"
 
     # --- Face check (CV, not LLM) ---
     insightface_model: str = "buffalo_l"
@@ -121,10 +124,11 @@ class Settings(BaseSettings):
     preset_package: str = "photocore_presets"
     preset_library_path: str | None = None
     # Runtime expectation on the curated library in 'package' mode. The reserved
-    # `default` fallback preset (and its convention) landed in 0.3.0; a prod
-    # deploy that pulls an older package fails fast at startup rather than
-    # silently losing the fallback. Only enforced for 'package' mode.
-    preset_min_library_version: str = "0.3.0"
+    # `default` fallback landed in 0.3.0; 0.4.0 dropped applies_to.gender (preset
+    # schema_v 3) and reworked the fallback's edit-framing — a prod deploy that
+    # pulls an older package fails fast at startup rather than running a stale
+    # contract. Only enforced for 'package' mode.
+    preset_min_library_version: str = "0.4.0"
 
     # --- Generation loop / budget safety ---
     # budget_limit is supplied per session by the business service; this is only a
@@ -147,11 +151,13 @@ class Settings(BaseSettings):
     # they reach pillow/the detector.
     max_photo_bytes: int = 20 * 1024 * 1024
 
-    # --- Cost estimation ---
-    # Price of one paid generation in abstract units; the business service maps
-    # units to real money. Used only for the plan's CostEstimate. Decimal, not
-    # float — it is price-like, the arithmetic must stay exact.
-    generation_unit_price: Decimal = Decimal("1.0")
+    # --- Cost / pricing ---
+    # Pay-as-you-go: budget_limit is real USD. Rates come from the built-in
+    # PricingTable (June-2026 OpenRouter numbers); this is a JSON object that
+    # overrides any of its fields at startup, so a price change ships without a
+    # deploy. Shape mirrors services.pricing.PricingTable (e.g.
+    # {"model_rates": {"<model>": {"input_per_mtok": "0.5", ...}}}).
+    pricing_overrides_json: str | None = None
     # Fallback expected paid generations when a preset ships no convergence stats.
     default_expected_generations: int = 3
 

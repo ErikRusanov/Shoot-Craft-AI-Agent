@@ -11,9 +11,11 @@ Five responsibilities the loop leans on, all TTL-bound and keyed by
   re-taken elsewhere can't be released out from under the new owner.
 - **idempotency** — store-once/read of a mutation's result by ``idem_key`` so a
   retried request replays the original outcome instead of doing the work twice.
-- **budget** — a single atomic check-and-increment of the paid-generation
-  counter. Atomic because two concurrent attempts must not both slip past the
-  last allowed slot (the real store does it in one Lua script).
+- **budget** — a reserve/settle pair over a per-session micro-USD counter.
+  ``budget_reserve`` atomically adds a conservative estimate if it fits under the
+  limit (two concurrent reservations must not both slip past the last dollar —
+  the real store does it in one Lua script); ``budget_adjust`` settles that
+  reservation to the real cost (or refunds it) with a signed delta.
 
 Everything is ``async``; concrete stores keep the I/O path non-blocking. The
 in-memory fallback honors the same contract minus real expiry.
@@ -69,14 +71,24 @@ class StateStore(Protocol):
         """
         ...
 
-    # --- budget (atomic) ---
-    async def check_and_incr_budget(
-        self, session_key: str, *, limit: int, ttl_seconds: int
+    # --- budget (reserve/settle, atomic) ---
+    async def budget_reserve(
+        self, session_key: str, *, estimate_micro: int, limit_micro: int, ttl_seconds: int
     ) -> bool:
-        """Atomically reserve one paid generation.
+        """Atomically reserve ``estimate_micro`` micro-USD against the limit.
 
-        If the counter is below ``limit``, increment it and return ``True`` (the
-        generation may proceed and is charged); otherwise leave it and return
-        ``False``. ``ttl_seconds`` bounds the counter to the session's lifetime.
+        If the already-spent counter plus ``estimate_micro`` stays at or below
+        ``limit_micro``, add the estimate and return ``True`` (the paid call may
+        proceed); otherwise leave the counter and return ``False`` (budget
+        exhausted). ``ttl_seconds`` bounds the counter to the session's lifetime.
+        """
+        ...
+
+    async def budget_adjust(self, session_key: str, *, delta_micro: int, ttl_seconds: int) -> int:
+        """Apply a signed micro-USD delta to the counter; return the new value.
+
+        Settle a reservation to its real cost (``delta = actual - estimate``,
+        usually negative) or refund it (``delta = -estimate``). The counter is
+        floored at zero, so a refund can never drive it negative.
         """
         ...

@@ -6,7 +6,6 @@ version: 1.0.0
 
 applies_to:
   use_case: [headshot, resume]
-  gender: [male, female, any]
 
 identity_instruction: >-
   Preserve the exact facial identity of the person in the reference photo: the

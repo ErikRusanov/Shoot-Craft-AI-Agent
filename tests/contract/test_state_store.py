@@ -95,22 +95,46 @@ async def test_idempotency_store_once(store: StateStore) -> None:
     assert await store.idem_get("idem-1") == b"result-A"
 
 
-async def test_budget_stops_at_limit(store: StateStore) -> None:
-    ok = [await store.check_and_incr_budget("sess-1", limit=3, ttl_seconds=TTL) for _ in range(5)]
+async def test_budget_reserve_stops_at_limit(store: StateStore) -> None:
+    # Reserve a fixed micro-USD estimate until the next one would exceed the limit.
+    ok = [
+        await store.budget_reserve("sess-1", estimate_micro=1, limit_micro=3, ttl_seconds=TTL)
+        for _ in range(5)
+    ]
     assert ok == [True, True, True, False, False]
 
 
-async def test_budget_is_atomic_under_concurrency(store: StateStore) -> None:
-    # Exactly `limit` concurrent reservations may win — never one more.
-    limit = 4
-    results = await asyncio.gather(
-        *(store.check_and_incr_budget("sess-1", limit=limit, ttl_seconds=TTL) for _ in range(20))
+async def test_budget_reserve_rejects_estimate_over_limit(store: StateStore) -> None:
+    # A single estimate larger than the whole limit is refused outright.
+    assert (
+        await store.budget_reserve("sess-1", estimate_micro=5, limit_micro=3, ttl_seconds=TTL)
+        is False
     )
-    assert sum(results) == limit
+
+
+async def test_budget_adjust_settles_and_floors(store: StateStore) -> None:
+    assert await store.budget_reserve("sess-1", estimate_micro=80, limit_micro=100, ttl_seconds=TTL)
+    # Settle the reservation down to the real cost (delta = actual - estimate).
+    assert await store.budget_adjust("sess-1", delta_micro=-13, ttl_seconds=TTL) == 67
+    # A refund can never drive the counter negative — it floors at zero.
+    assert await store.budget_adjust("sess-1", delta_micro=-1000, ttl_seconds=TTL) == 0
+
+
+async def test_budget_is_atomic_under_concurrency(store: StateStore) -> None:
+    # Exactly `limit / estimate` concurrent reservations may win — never one more.
+    results = await asyncio.gather(
+        *(
+            store.budget_reserve("sess-1", estimate_micro=1, limit_micro=4, ttl_seconds=TTL)
+            for _ in range(20)
+        )
+    )
+    assert sum(results) == 4
 
 
 async def test_budget_is_per_session(store: StateStore) -> None:
-    assert await store.check_and_incr_budget("sess-1", limit=1, ttl_seconds=TTL) is True
-    assert await store.check_and_incr_budget("sess-1", limit=1, ttl_seconds=TTL) is False
+    assert await store.budget_reserve("sess-1", estimate_micro=1, limit_micro=1, ttl_seconds=TTL)
+    assert not await store.budget_reserve(
+        "sess-1", estimate_micro=1, limit_micro=1, ttl_seconds=TTL
+    )
     # A different session has its own counter.
-    assert await store.check_and_incr_budget("sess-2", limit=1, ttl_seconds=TTL) is True
+    assert await store.budget_reserve("sess-2", estimate_micro=1, limit_micro=1, ttl_seconds=TTL)

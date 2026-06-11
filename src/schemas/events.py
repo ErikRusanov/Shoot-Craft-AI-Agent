@@ -70,14 +70,16 @@ class IterationResultEvent(SchemaModel):
     ``similarity``/``verdict``/``risk_level``; an attempt that produced no
     measured frame (provider error, or a face-check that crashed on a paid
     frame) carries ``error`` instead and leaves those ``None``. ``charged``
-    distinguishes a paid-but-unmeasured frame from a transport-failed one.
+    distinguishes a paid-but-unmeasured frame from a transport-failed one, and
+    ``cost`` is the dollars this attempt settled (0 when nothing was charged).
     The preset triple pins which thresholds/version produced the score.
     """
 
-    schema_v: int = 2
+    schema_v: int = 3
     type: Literal["iteration_result"] = "iteration_result"
     n: int
     charged: bool
+    cost: Decimal = Decimal("0")  # USD settled for this attempt
     similarity: float | None = None
     verdict: Verdict | None = None
     risk_level: RiskLevel | None = None
@@ -101,18 +103,19 @@ class ResultEvent(SchemaModel):
     """The delivered keep-best image.
 
     Self-sufficient: it carries what the run cost (``iterations_used``,
-    ``generations_spent``, ``actual_cost``) and the preset triple that
+    ``generations_spent``, ``cost_spent``) and the preset triple that
     produced it, so the business service needs no second snapshot read and
-    the result stays reproducible after a library update. The image bytes
-    themselves live in object storage under ``best.result_ref``.
+    the result stays reproducible after a library update. ``cost_spent`` is the
+    real dollars billed (generations plus any auxiliary LLM calls). The image
+    bytes themselves live in object storage under ``best.result_ref``.
     """
 
-    schema_v: int = 2
+    schema_v: int = 3
     type: Literal["result"] = "result"
     best: BestResult
     iterations_used: int
     generations_spent: int
-    actual_cost: Decimal
+    cost_spent: Decimal
     preset_id: str | None = None
     preset_version: str | None = None
     library_version: str | None = None
@@ -128,14 +131,14 @@ class FailedEvent(SchemaModel):
     before the failure (e.g. a wall-clock timeout mid-generation).
     """
 
-    schema_v: int = 2
+    schema_v: int = 3
     type: Literal["failed"] = "failed"
     code: FailureCode
     reason: str
     gate_reason: GateReason | None = None
     iterations_used: int = 0
     generations_spent: int = 0
-    actual_cost: Decimal = Decimal("0")
+    cost_spent: Decimal = Decimal("0")
 
 
 class DoneEvent(SchemaModel):

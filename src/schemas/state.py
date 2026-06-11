@@ -21,7 +21,7 @@ from decimal import Decimal
 from pydantic import Field
 
 from schemas.base import SchemaModel, StrictModel
-from schemas.enums import FsmState, GateReason, Gender, RiskLevel, Verdict
+from schemas.enums import FsmState, GateReason, PaidCallKind, RiskLevel, Verdict
 from schemas.presets import Thresholds
 
 
@@ -77,6 +77,7 @@ class FaceProfile(SchemaModel):
     object-storage ref of the source photo.
     """
 
+    schema_v: int = 2
     face_key: str
     # Identity vector — biometric, never logged. Empty when no face was detected
     # (the gate then says NO_FACE and the profile is unusable for generation).
@@ -84,29 +85,65 @@ class FaceProfile(SchemaModel):
     gate_verdict: Verdict
     gate_reason: GateReason
     metrics: FrameMetrics
-    # Estimated by the CV attribute model; a generation hint, not an identity
-    # claim. No age anywhere: the CV estimate proved unusable on real photos,
-    # and preset matching is use_case/gender only.
-    gender: Gender | None = None
+    # No demographics: the face comes from the reference, so neither age nor
+    # gender drives anything here. Preset matching is use_case only.
     convergence: ConvergenceStats = Field(default_factory=ConvergenceStats)
     photo_ref: str  # object-storage key of the input photo
+
+
+class ProviderUsage(StrictModel):
+    """What the upstream actually billed for one paid call.
+
+    ``cost`` is the dollars OpenRouter reports it charged (``usage.cost``, now
+    always returned) — the source of truth the budget settles against. The token
+    counts are observability: they explain the cost and feed offline pricing
+    calibration. All optional: a provider that omits ``usage`` leaves the meter
+    to settle on its reserved estimate instead.
+    """
+
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    cost: Decimal | None = None  # USD actually billed for this call
+
+
+class PaidCallRecord(StrictModel):
+    """One non-generation paid call (slot fill, use-case classification).
+
+    Generation spend lives on :class:`Iteration`; these are the auxiliary LLM
+    calls that share the same dollar budget. Kept on the session so
+    ``cost_spent`` accounts for *every* dollar, not just the images.
+    """
+
+    kind: PaidCallKind
+    cost: Decimal  # USD settled for this call
+    usage: ProviderUsage | None = None
 
 
 class Iteration(SchemaModel):
     """One generation attempt and its measured outcome.
 
     ``charged`` records whether this attempt counted against the budget (a failed
-    provider call that produced nothing is not charged). ``prompt_hash`` ties the
-    attempt to the exact prompt for reproducibility without storing the text.
+    provider call that produced nothing is not charged); it stays equivalent to
+    ``cost > 0``. ``cost`` is the dollars this attempt settled — actual
+    ``usage.cost`` when the provider reported it, else the reserved estimate.
+    ``prompt_hash`` ties the attempt to the exact prompt for reproducibility.
     """
 
+    schema_v: int = 2
     n: int
     prompt_hash: str
+    # The full prompt text, kept so a surprising result can be debugged from the
+    # snapshot rather than blind (the hash alone proves reproducibility but says
+    # nothing about *what* was sent). Scene text only — no biometrics — so it is
+    # safe on the record, though it is never logged.
+    prompt_text: str | None = None
     provider_request_id: str | None = None
     result_ref: str | None = None  # object-storage key of the generated image
     similarity: float | None = None
     verdict: Verdict | None = None
     charged: bool = False
+    cost: Decimal = Decimal("0")  # USD settled for this attempt
+    usage: ProviderUsage | None = None
     risk_level: RiskLevel | None = None
     # Why a charged frame stayed unmeasured (face-check crash) or an attempt
     # produced nothing (provider error) — so the history explains the gap.
@@ -135,18 +172,21 @@ class Plan(StrictModel):
 
 
 class CostEstimate(StrictModel):
-    """Paid-generation forecast for the plan.
+    """Paid-spend forecast for the plan, in real USD.
 
-    ``budget_limit`` is the hard ceiling supplied per session by the business
-    service; ``generations`` is what the plan expects to spend under it.
-    ``unit_price`` / ``total_cost`` are in abstract config units — mapping them
-    to user-facing money is the business service's job, not the core's — but
-    they are still price-like, so ``Decimal`` keeps the arithmetic exact.
+    ``budget_limit`` is the per-session dollar ceiling from the business service;
+    ``generations`` is how many paid generations the plan expects to fit under
+    it — bounded by what the *padded* reservation actually admits, so the plan
+    never promises a generation the runtime would refuse. ``per_generation_cost``
+    is the realistic (unpadded) price of one generation, ``llm_overhead_cost``
+    the auxiliary LLM spend (slot fill, classification), and ``total_cost`` their
+    sum. All ``Decimal`` so the money arithmetic stays exact.
     """
 
     generations: int
-    budget_limit: int
-    unit_price: Decimal = Decimal("0")
+    budget_limit: Decimal = Decimal("0")
+    per_generation_cost: Decimal = Decimal("0")
+    llm_overhead_cost: Decimal = Decimal("0")
     total_cost: Decimal = Decimal("0")
     note: str | None = None
 
@@ -168,8 +208,13 @@ class SessionState(SchemaModel):
     pins the exact preset content used, so a result stays reproducible across
     library updates. ``thresholds`` is copied from the matched preset so a later
     library change cannot retroactively move this session's bar.
+
+    ``budget_limit`` is the per-session dollar ceiling (pay-as-you-go); every
+    paid call — generations and the auxiliary LLM calls in ``llm_calls`` —
+    settles against it, and :meth:`cost_spent` totals what was actually billed.
     """
 
+    schema_v: int = 2
     session_key: str
     face_key: str
     fsm_state: FsmState = FsmState.CREATED
@@ -181,8 +226,19 @@ class SessionState(SchemaModel):
     cost_estimate: CostEstimate | None = None
     approved: bool = False
     iterations: list[Iteration] = Field(default_factory=list)
+    llm_calls: list[PaidCallRecord] = Field(default_factory=list)  # auxiliary paid LLM spend
     thresholds: Thresholds | None = None  # frozen at match time
     best_result: BestResult | None = None
-    budget_limit: int = 0  # paid generations allowed; from the business service
+    budget_limit: Decimal = Decimal("0")  # USD ceiling; from the business service
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    def cost_spent(self) -> Decimal:
+        """Total USD actually billed this session — generations plus LLM calls."""
+        return sum((it.cost for it in self.iterations), Decimal("0")) + sum(
+            (c.cost for c in self.llm_calls), Decimal("0")
+        )
+
+    def generations_spent(self) -> int:
+        """Paid generations charged (settled cost > 0), not provider calls made."""
+        return sum(1 for it in self.iterations if it.charged)

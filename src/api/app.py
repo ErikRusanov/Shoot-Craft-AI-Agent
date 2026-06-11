@@ -21,7 +21,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from api.deps import build_container
-from api.routes import faces_router, health_router, router
+from api.routes import faces_router, health_router, presets_router, router
 from config import Settings, get_settings
 
 
@@ -41,6 +41,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.container = container
     app.include_router(router)
     app.include_router(faces_router)
+    app.include_router(presets_router)
     app.include_router(health_router)
 
     async def _store_unavailable(request: Request, exc: Exception) -> JSONResponse:

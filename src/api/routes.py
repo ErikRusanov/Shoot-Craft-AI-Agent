@@ -39,6 +39,10 @@ from schemas import (
     IngestPhotoRequest,
     IngestPhotoResponse,
     InputAnswerRequest,
+    Preset,
+    PresetAsk,
+    PresetCatalog,
+    PresetSummary,
     SchemaModel,
     SessionAck,
     SessionSnapshot,
@@ -46,10 +50,12 @@ from schemas import (
     StartSessionResponse,
     Verdict,
 )
+from services.classifier import FALLBACK_USE_CASE
 from services.vision import face_crop_ref, photo_ref
 
 router = APIRouter(prefix="/v1/sessions")
 faces_router = APIRouter(prefix="/v1/faces")
+presets_router = APIRouter(prefix="/v1/presets")
 health_router = APIRouter()
 
 _TERMINAL_STATES = frozenset({FsmState.DONE, FsmState.FAILED, FsmState.CANCELLED})
@@ -172,12 +178,19 @@ async def start_session(
                 status_code=422,
                 detail=f"face_key {body.face_key!r} did not pass the quality gate; re-ingest",
             )
-        preset = container.library.resolve(use_case=body.use_case, gender=body.gender)
+        # With a use_case the preset (and its id) are known up front; without one
+        # the classify node picks it from the brief, so the response can only
+        # confirm a run will start (a fallback exists), not which preset yet.
+        preset = (
+            container.library.resolve(use_case=body.use_case)
+            if body.use_case
+            else container.library.fallback
+        )
         started = await container.runner.start(
             session_key,
             face_key=body.face_key,
-            use_case=body.use_case,
-            gender=body.gender,
+            use_case=body.use_case or "",
+            brief=body.brief or "",
             budget_limit=body.budget_limit,
         )
         if not started:
@@ -188,7 +201,7 @@ async def start_session(
             session_key=session_key,
             fsm_state=FsmState.CREATED if preset is not None else FsmState.FAILED,
             matched=preset is not None,
-            preset_id=preset.id if preset is not None else None,
+            preset_id=preset.id if (body.use_case and preset is not None) else None,
         )
 
     return await _idempotent(container, "start", body.idem_key, StartSessionResponse, op)
@@ -258,7 +271,8 @@ async def session_snapshot(session_key: str, container: ContainerDep) -> Session
     session = await _session_or_404(container, session_key)
     return SessionSnapshot(
         state=session,
-        generations_spent=sum(1 for it in session.iterations if it.charged),
+        generations_spent=session.generations_spent(),
+        cost_spent=session.cost_spent(),
     )
 
 
@@ -268,6 +282,43 @@ async def stream_events(
 ) -> EventSourceResponse:
     last_id = request.headers.get("Last-Event-ID")
     return EventSourceResponse(session_event_stream(container.bus, session_key, last_id=last_id))
+
+
+# --- presets ---
+
+
+def _preset_summary(preset: Preset) -> PresetSummary:
+    """The catalog projection of a preset — matcher tokens and its ask slot only,
+    never the frozen prompt content (the moat)."""
+    asks = [
+        PresetAsk(
+            slot=name,
+            options=[str(o) for o in slot.enum] if slot.enum else None,
+            default=str(slot.default) if slot.default is not None else None,
+        )
+        for name, slot in preset.slots.items()
+        if slot.ask
+    ]
+    return PresetSummary(
+        id=preset.id,
+        version=preset.version,
+        use_case_tokens=list(preset.applies_to.use_case),
+        is_fallback=preset.id == FALLBACK_USE_CASE,
+        asks=asks,
+    )
+
+
+@presets_router.get("")
+async def list_presets(container: ContainerDep) -> PresetCatalog:
+    """The preset catalog the business service offers the user — ids, versions,
+    matcher tokens and ask slots. The reserved ``default`` fallback is flagged,
+    not offered as a choice."""
+    presets = [
+        _preset_summary(preset)
+        for pid in container.library.ids
+        if (preset := container.library.get(pid)) is not None
+    ]
+    return PresetCatalog(presets=presets, library_version=container.library.library_version)
 
 
 # --- health ---

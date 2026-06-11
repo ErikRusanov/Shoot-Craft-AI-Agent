@@ -62,7 +62,6 @@ class FakeFaceEngine:
                 yaw=0.0,
                 pitch=0.0,
                 roll=0.0,
-                gender=None,
                 embedding=self._identity.copy(),
             )
         ]

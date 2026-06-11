@@ -83,7 +83,7 @@ async def test_generate_one_image(settings: Settings, client: OpenRouterClient) 
     generator = OpenRouterImageGenerator(client, model=settings.generation_model)
     reference = _synthetic_portrait()
 
-    image_bytes, request_id = await generator.generate(
+    image_bytes, request_id, _usage = await generator.generate(
         prompt=(
             "A photorealistic studio portrait of the person in the reference "
             "image, neutral grey background, soft frontal lighting."

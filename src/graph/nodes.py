@@ -29,7 +29,7 @@ from typing import Any, Protocol
 from langgraph.types import interrupt
 
 from graph.state import GraphState
-from protocols import EventBus, ObjectStorage, SlotFiller, StateStore
+from protocols import EventBus, ObjectStorage, SlotFiller, StateStore, UseCaseClassifier
 from schemas import (
     CompositionChoice,
     CostEvent,
@@ -38,6 +38,8 @@ from schemas import (
     FailureCode,
     FsmState,
     GateReason,
+    PaidCallKind,
+    PaidCallRecord,
     Plan,
     PlanEvent,
     Preset,
@@ -47,12 +49,16 @@ from schemas import (
     StageEvent,
     Verdict,
 )
+from services.budget import BudgetService
+from services.classifier import FALLBACK_USE_CASE
 from services.estimator import estimate_cost
 from services.generation_loop import GenerationLoop
 from services.preset_matcher import PresetLibrary
+from services.pricing import PricingTable
 from services.prompt_builder import FreeFormRejectedError, build_prompt
 from services.slot_filler import apply_composition
 from services.vision import VisionService, face_crop_ref, photo_ref
+from utils.money import from_micro
 
 
 class NodeFn(Protocol):
@@ -73,8 +79,11 @@ class GraphServices:
     vision: VisionService
     library: PresetLibrary
     slot_filler: SlotFiller
+    classifier: UseCaseClassifier
     generation_loop: GenerationLoop
-    unit_price: Decimal
+    budget: BudgetService
+    pricing: PricingTable
+    generation_model: str
     default_expected_generations: int
     session_ttl_seconds: int
     face_ttl_seconds: int
@@ -133,7 +142,7 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         await svc.store.put_session(session, ttl_seconds=svc.session_ttl_seconds)
 
     def _resolve(state: GraphState) -> Preset:
-        preset = svc.library.resolve(use_case=state["use_case"], gender=state["gender"])
+        preset = svc.library.resolve(use_case=state["use_case"])
         if preset is None:  # the ask node already routed this case to fail
             raise ValueError(f"no preset admits use_case={state['use_case']!r}")
         return preset
@@ -145,7 +154,9 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         session = await svc.store.get_session(session_key)
         if session is None:
             session = SessionState(
-                session_key=session_key, face_key=face_key, budget_limit=state["budget_limit"]
+                session_key=session_key,
+                face_key=face_key,
+                budget_limit=from_micro(state["budget_limit"]),
             )
         session.fsm_state = FsmState.FACE_CHECK
         await _checkpoint(session)
@@ -180,9 +191,37 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
             )
         return {}
 
+    async def classify(state: GraphState) -> dict[str, Any]:
+        """Resolve ``use_case`` from the user's free-text brief when the caller
+        gave none — a paid LLM call (budgeted) with a free deterministic fallback.
+
+        A caller-supplied ``use_case`` passes through untouched; an empty brief
+        needs no call and resolves to the reserved fallback preset.
+        """
+        if state["use_case"]:
+            return {}
+        brief = state.get("brief", "")
+        if not brief.strip():
+            return {"use_case": FALLBACK_USE_CASE}
+        meter = svc.budget.meter(
+            state["session_key"],
+            limit=from_micro(state["budget_limit"]),
+            ttl_seconds=svc.session_ttl_seconds,
+        )
+        result = await svc.classifier.classify(
+            brief=brief, use_cases=svc.library.use_case_tokens, meter=meter
+        )
+        if result.cost > 0:
+            session = await _session(state["session_key"])
+            session.llm_calls.append(
+                PaidCallRecord(kind=PaidCallKind.CLASSIFY, cost=result.cost, usage=result.usage)
+            )
+            await _checkpoint(session)
+        return {"use_case": result.use_case}
+
     async def ask(state: GraphState) -> dict[str, Any]:
         """The single clarifying question — the preset's ``ask:true`` slot."""
-        preset = svc.library.resolve(use_case=state["use_case"], gender=state["gender"])
+        preset = svc.library.resolve(use_case=state["use_case"])
         if preset is None:
             return _failure(
                 f"no preset admits use_case={state['use_case']!r} and no fallback ships",
@@ -192,6 +231,14 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         if asked is None:
             return {"answer": None}
         name, slot = asked
+
+        # A free-form ask slot (the fallback's scene) is answered by the user's
+        # brief when there is one — no need to round-trip the same question. The
+        # filler takes the brief verbatim; the prompt builder sanitizes it. A
+        # re-ask (poisoned brief) falls through to the interrupt for a fresh answer.
+        brief = state.get("brief", "")
+        if slot.enum is None and brief.strip() and not state.get("reask_reason"):
+            return {"answer": brief}
 
         session = await _session(state["session_key"])
         session.fsm_state = FsmState.NEED_INPUT
@@ -219,10 +266,16 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
 
         preset = _resolve(state)
         face = await svc.store.get_face(state["face_key"])
+        meter = svc.budget.meter(
+            session_key,
+            limit=from_micro(state["budget_limit"]),
+            ttl_seconds=svc.session_ttl_seconds,
+        )
         fill = await svc.slot_filler.fill(
             preset=preset,
             user_answer=state.get("answer"),
             photo_analysis=face.metrics if face else None,
+            meter=meter,
         )
         try:
             build_prompt(preset, fill.slots, addendum=fill.addendum)
@@ -244,6 +297,12 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         session.preset_version = preset.version
         session.library_version = svc.library.library_version
         session.slots = fill.slots
+        # Account the slot-fill spend against the dollar budget (the meter already
+        # settled it; this records the line so cost_spent stays complete).
+        if fill.cost > 0:
+            session.llm_calls.append(
+                PaidCallRecord(kind=PaidCallKind.SLOT_FILL, cost=fill.cost, usage=fill.usage)
+            )
         # Frozen at match time so a later library update cannot retroactively
         # move this session's identity bar.
         session.thresholds = preset.thresholds
@@ -262,8 +321,9 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         preset = _resolve(state)
         cost = estimate_cost(
             preset,
-            budget_limit=state["budget_limit"],
-            unit_price=svc.unit_price,
+            budget_limit=from_micro(state["budget_limit"]),
+            pricing=svc.pricing,
+            generation_model=svc.generation_model,
             default_expected_generations=svc.default_expected_generations,
         )
         slots = state.get("slots", {})
@@ -345,9 +405,11 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
             session.fsm_state = FsmState.FAILED
             await _checkpoint(session)
         # A pre-loop failure spent nothing in the common case, but a session may
-        # already carry charged iterations on resume — account from the record.
-        generations_spent = sum(1 for it in session.iterations if it.charged) if session else 0
+        # already carry charged iterations or slot-fill spend on resume — account
+        # from the record.
+        generations_spent = session.generations_spent() if session else 0
         iterations_used = len(session.iterations) if session else 0
+        cost_spent = session.cost_spent() if session else Decimal("0")
         raw_reason = failure.get("gate_reason")
         raw_code = failure.get("code")
         await svc.bus.publish(
@@ -358,7 +420,7 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
                 gate_reason=GateReason(raw_reason) if raw_reason else None,
                 iterations_used=iterations_used,
                 generations_spent=generations_spent,
-                actual_cost=svc.unit_price * generations_spent,
+                cost_spent=cost_spent,
             ),
         )
         return {}
@@ -366,6 +428,7 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
     return {
         "analyze": analyze,
         "quality_gate": quality_gate,
+        "classify": classify,
         "ask": ask,
         "match_fill": match_fill,
         "plan": plan,

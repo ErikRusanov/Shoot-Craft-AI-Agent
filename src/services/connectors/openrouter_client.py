@@ -17,7 +17,30 @@ from typing import Any
 
 import httpx
 
+from schemas import ProviderUsage
+from utils.money import parse_usd
 from utils.retry import TransientUpstreamError, UpstreamRequestError, with_transient_retry
+
+
+def parse_usage(body: dict[str, Any]) -> ProviderUsage | None:
+    """Pull the ``usage`` block (now always returned) off a completion body.
+
+    ``cost`` is the dollars OpenRouter says it billed — the budget's source of
+    truth; the token counts are observability. A missing/foreign ``usage`` shape
+    collapses to ``None`` (the meter then settles on its reserved estimate), so
+    accounting never crashes on a provider quirk.
+    """
+    usage = body.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    raw_cost = usage.get("cost")
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    return ProviderUsage(
+        prompt_tokens=prompt_tokens if isinstance(prompt_tokens, int) else None,
+        completion_tokens=completion_tokens if isinstance(completion_tokens, int) else None,
+        cost=parse_usd(raw_cost) if isinstance(raw_cost, int | float | str) else None,
+    )
 
 
 class OpenRouterClient:

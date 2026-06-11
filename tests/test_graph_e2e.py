@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -42,6 +43,7 @@ from graph.state import initial_state
 from schemas import Event, FsmState, Verdict
 from services.vision import photo_ref
 from tests.api_utils import SseFrame, collect_until, iter_sse, make_settings, noise_png, serve
+from utils.money import to_micro
 
 E2E_TIMEOUT = 30
 TTL = 3600
@@ -51,7 +53,6 @@ ANSWER = "a chat or forum avatar"
 START_BODY = {
     "face_key": "face-1",
     "use_case": "avatar",
-    "gender": "female",
     "budget_limit": 4,
     "idem_key": "idem-start-1",
 }
@@ -69,17 +70,17 @@ APPROVE_BODY = {
 }
 
 
-async def assert_budget_consumed(container: Container, session_key: str, expected: int) -> None:
-    """Pin the exact counter via two probes (the port has no read) — refusal at
-    ``limit=expected`` proves >= expected, acceptance at +1 proves == expected."""
-    store = container.store
+async def assert_generations_charged(container: Container, session_key: str, expected: int) -> None:
+    """The session record is the spend ledger now: charged generations and the
+    real dollar cost both come off it (the dollar counter holds padded micro-USD
+    estimates, not a clean per-generation tally)."""
+    session = await container.store.get_session(session_key)
+    assert session is not None
+    assert session.generations_spent() == expected
     if expected:
-        assert not await store.check_and_incr_budget(
-            session_key, limit=expected, ttl_seconds=TTL
-        ), f"budget counter is below {expected}"
-    assert await store.check_and_incr_budget(session_key, limit=expected + 1, ttl_seconds=TTL), (
-        f"budget counter is above {expected}"
-    )
+        assert session.cost_spent() > 0
+    else:
+        assert session.cost_spent() == 0
 
 
 async def flush_redis(redis_url: str) -> None:
@@ -142,7 +143,8 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
             assert [c["id"] for c in plan["compositions"]] == ["neutral_grey"]
             cost = json.loads(next(f for f in seen if f.event == "cost").data)["cost"]
             assert cost["generations"] == 2
-            assert cost["budget_limit"] == 4
+            # Decimal USD on the 6-dp grid, serialized as a string.
+            assert cost["budget_limit"] == "4.000000"
 
             resp = await client.post("/v1/sessions/s1/approve", json=APPROVE_BODY)
             assert resp.status_code == 202
@@ -201,7 +203,7 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
     assert session.best_result is not None
     assert session.best_result.verdict is Verdict.PASSED
     assert await container.storage.get(session.best_result.result_ref)
-    await assert_budget_consumed(container, "s1", 1)
+    await assert_generations_charged(container, "s1", 1)
 
 
 async def test_below_floor_photo_fails_before_asking(server: tuple[str, Container]) -> None:
@@ -227,7 +229,7 @@ async def test_below_floor_photo_fails_before_asking(server: tuple[str, Containe
     assert session is not None
     assert session.fsm_state is FsmState.FAILED
     assert session.iterations == []
-    await assert_budget_consumed(container, "s-low", 0)
+    await assert_generations_charged(container, "s-low", 0)
 
 
 async def test_rejected_plan_fails_without_spending(server: tuple[str, Container]) -> None:
@@ -257,7 +259,7 @@ async def test_rejected_plan_fails_without_spending(server: tuple[str, Container
     assert session is not None
     assert session.fsm_state is FsmState.FAILED
     assert session.iterations == []
-    await assert_budget_consumed(container, "s1", 0)
+    await assert_generations_charged(container, "s1", 0)
 
 
 async def test_crash_between_approve_and_loop_resumes_without_double_pay(
@@ -273,8 +275,8 @@ async def test_crash_between_approve_and_loop_resumes_without_double_pay(
         session_key="s-crash",
         face_key="face-1",
         use_case="avatar",
-        gender="female",
-        budget_limit=3,
+        brief="",
+        budget_limit=to_micro(Decimal("3")),
     )
 
     async with asyncio.timeout(E2E_TIMEOUT):
@@ -302,7 +304,7 @@ async def test_crash_between_approve_and_loop_resumes_without_double_pay(
         assert session is not None
         assert session.fsm_state is FsmState.DONE
         assert [it.charged for it in session.iterations] == [True]
-        await assert_budget_consumed(second, "s-crash", 1)
+        await assert_generations_charged(second, "s-crash", 1)
 
         # Pre-approve nodes did not re-run after the restart: the whole stream
         # carries exactly one face_check stage and one plan.
@@ -330,8 +332,8 @@ async def test_freeform_injection_is_reasked_then_accepted(tmp_path: Any) -> Non
         session_key="s-inject",
         face_key="face-1",
         use_case="something_uncurated",  # no curated preset → the `default` fallback
-        gender="female",
-        budget_limit=2,
+        brief="",
+        budget_limit=to_micro(Decimal("2")),
     )
 
     async with asyncio.timeout(E2E_TIMEOUT):

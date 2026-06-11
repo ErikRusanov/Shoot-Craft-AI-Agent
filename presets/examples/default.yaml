@@ -6,27 +6,34 @@
 # preset's `applies_to` covers the request, the matcher resolves to THIS preset
 # instead of failing. The use_case token `default` is reserved too — never
 # keyword-matched, never used by another preset.
+#
+# Framing: this is a photo EDIT of a real reference, not "a portrait in their
+# likeness". The frozen blocks below tell the model to reproduce the exact person
+# and apply ONLY the user's requested change ({scene}); everything else stays as
+# in the reference. That keeps "do not change the photo, make the background blue"
+# an edit, not a fresh generation that drifts the face.
 id: default
 version: 1.0.0
 
 applies_to:
-  # The reserved fallback token — see the header. Wide gender list so the fallback
-  # admits anyone once the matcher has decided to fall back.
+  # The reserved fallback token — see the header.
   use_case: [default]
-  gender: [male, female, any]
 
 identity_instruction: >-
-  Preserve the exact facial identity of the person in the reference photo: the
-  same face geometry, eyes, nose, lips, jawline, skin tone, and any moles or
-  scars. Do not beautify, slim, age, or restyle the face. Reproduce a faithful,
-  recognizable likeness of the same individual.
+  Reproduce the exact person from the reference photo. The face must be IDENTICAL:
+  the same geometry and bone structure, eyes, eyebrows, nose, lips, jawline, skin
+  tone and complexion, and any moles, freckles or scars. Do not beautify, slim,
+  age, de-age, restyle, or otherwise alter the face. This is a photo edit of a
+  real person — never a new portrait merely resembling them.
 
-# {scene} carries the user's own free-form description; the surrounding wording
-# keeps the output a grounded photorealistic portrait whatever the user asks.
+# {scene} carries the user's own change request, verbatim. The framing is an
+# edit: apply only that change, keep everything else as the reference shows it.
 prompt_structure: >-
-  Photorealistic portrait of the person, {scene}, with {expression}. {lighting}.
-  Natural skin texture, true-to-life colors, sharp focus on the eyes, no
-  stylization beyond what the scene explicitly asks for.
+  Edit the reference photo of the person. Apply only the following change:
+  {scene}. Everything not named in that change must remain exactly as in the
+  reference photo — the same face, the same person, the same framing and setting
+  unless the change says otherwise. Keep it photorealistic with natural skin
+  texture and true-to-life colors; add no stylization beyond the requested change.
 
 negative_prompt: >-
   cartoon, illustration, 3d render, plastic or waxy skin, beauty filter,
@@ -35,36 +42,24 @@ negative_prompt: >-
 
 slots:
   # The single clarifying question — FREE-FORM (no enum): the user describes the
-  # photo in their own words. The default keeps the template rendering when no
-  # answer arrives; the prompt builder sanitizes any answer that does.
+  # change in their own words. NO default on purpose: a missing description must
+  # trigger a question (or be fed from the start brief), never a silent generic
+  # phrase that overrides what the user actually asked for. The prompt builder
+  # sanitizes the text (scene-only; face/identity edits are rejected).
   scene:
     required: true
     ask: true
-    default: "in a natural, flattering setting that suits them"
-  expression:
-    required: false
-    ask: false
-    default: "a natural, relaxed expression"
-    enum:
-      - "a natural, relaxed expression"
-      - "a soft, friendly smile"
-      - "a neutral, composed expression"
-  lighting:
-    required: false
-    ask: false
-    default: "Soft, flattering light appropriate to the scene"
-    enum:
-      - "Soft, flattering light appropriate to the scene"
-      - "Warm golden-hour light"
-      - "Even, neutral studio-like light"
 
 generation:
-  temperature: 0.50
+  # Low temperature: a faithful edit, not a creative reinterpretation.
+  temperature: 0.20
   aspect_ratio: "3:4"
   face_media_resolution: high
 
 thresholds:
-  similarity_threshold: 0.60  # placeholder; calibrate on real pipeline output
+  # TODO(calibrate): placeholders. Re-run the sandbox after the edit-framing
+  # change and tune against this pipeline's real-vs-AI similarity distribution.
+  similarity_threshold: 0.60  # placeholder
   identity_floor: 0.50  # placeholder
   K_max_retries: 3
 
@@ -72,7 +67,6 @@ compositions:
   - id: studio_neutral
     label: "Studio — clean neutral backdrop"
     slot_overrides:
-      scene: "in a clean, minimal studio against a neutral backdrop"
-      lighting: "Even, neutral studio-like light"
+      scene: "place the person against a clean, minimal neutral studio backdrop"
 
 anchor_examples: []

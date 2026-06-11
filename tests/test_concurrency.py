@@ -57,11 +57,17 @@ async def _drain(
 async def test_parallel_budget_never_overdraws(store: StateStore) -> None:
     limit = 10
     results = await asyncio.gather(
-        *(store.check_and_incr_budget("sess-1", limit=limit, ttl_seconds=TTL) for _ in range(60))
+        *(
+            store.budget_reserve("sess-1", estimate_micro=1, limit_micro=limit, ttl_seconds=TTL)
+            for _ in range(60)
+        )
     )
     assert sum(results) == limit
     # The counter is saturated for good — a late retry still gets nothing.
-    assert await store.check_and_incr_budget("sess-1", limit=limit, ttl_seconds=TTL) is False
+    assert (
+        await store.budget_reserve("sess-1", estimate_micro=1, limit_micro=limit, ttl_seconds=TTL)
+        is False
+    )
 
 
 # --- lock serialization ---
@@ -183,7 +189,9 @@ async def test_state_budget_and_stream_survive_redis_restart(
 
         session = SessionState(session_key="sess-1", face_key="face-1")
         await store.put_session(session, ttl_seconds=3600)
-        assert await store.check_and_incr_budget("sess-1", limit=3, ttl_seconds=3600) is True
+        assert await store.budget_reserve(
+            "sess-1", estimate_micro=1, limit_micro=3, ttl_seconds=3600
+        )
         ids = [await bus.publish("sess-1", StageEvent(stage=FsmState.PLANNING)) for _ in range(3)]
     finally:
         await client.aclose()
@@ -202,9 +210,15 @@ async def test_state_budget_and_stream_survive_redis_restart(
         assert await store.get_session("sess-1") == session
         # Budget resumes from the persisted count (1 used of 3) — and the Lua
         # script registers against the fresh, empty script cache.
-        assert await store.check_and_incr_budget("sess-1", limit=3, ttl_seconds=3600) is True
-        assert await store.check_and_incr_budget("sess-1", limit=3, ttl_seconds=3600) is True
-        assert await store.check_and_incr_budget("sess-1", limit=3, ttl_seconds=3600) is False
+        assert await store.budget_reserve(
+            "sess-1", estimate_micro=1, limit_micro=3, ttl_seconds=3600
+        )
+        assert await store.budget_reserve(
+            "sess-1", estimate_micro=1, limit_micro=3, ttl_seconds=3600
+        )
+        assert not await store.budget_reserve(
+            "sess-1", estimate_micro=1, limit_micro=3, ttl_seconds=3600
+        )
         # The stream resumes by pre-restart id with nothing lost...
         got = await _drain(bus, "sess-1", last_id=ids[1], n=1)
         assert got[0].id == ids[2]

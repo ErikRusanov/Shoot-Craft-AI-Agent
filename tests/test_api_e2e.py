@@ -40,7 +40,6 @@ SMALL_PHOTO_B64 = base64.b64encode(noise_png(side=200)).decode()
 START_BODY = {
     "face_key": "f1",
     "use_case": "avatar",
-    "gender": "female",
     "budget_limit": 4,
     "idem_key": "start-1",
 }
@@ -326,6 +325,26 @@ async def test_wall_clock_fails_session(tmp_path: Any) -> None:
         async with c.stream("GET", "/v1/sessions/s1/events") as stream:
             await collect_until(iter_sse(stream.aiter_lines()), seen, "failed")
         assert json.loads(seen[-1].data)["reason"] == "session run exceeded the wall-clock limit"
+
+
+async def test_list_presets(server: tuple[str, Container]) -> None:
+    """The catalog advertises ids, versions, matcher tokens and ask slots; the
+    reserved fallback is flagged, not offered as a choice."""
+    url, _ = server
+    async with asyncio.timeout(TIMEOUT), httpx.AsyncClient(base_url=url, timeout=TIMEOUT) as c:
+        resp = await c.get("/v1/presets")
+        assert resp.status_code == 200
+        catalog = resp.json()
+        assert catalog["library_version"] == "examples"
+
+        by_id = {p["id"]: p for p in catalog["presets"]}
+        assert "avatar" in by_id["demo_avatar"]["use_case_tokens"]
+        assert by_id["demo_avatar"]["is_fallback"] is False
+        # The fallback is present but flagged, and asks a free-form scene (no options).
+        fallback = by_id["default"]
+        assert fallback["is_fallback"] is True
+        assert fallback["use_case_tokens"] == ["default"]
+        assert fallback["asks"] == [{"slot": "scene", "options": None, "default": None}]
 
 
 async def test_health_and_readiness(server: tuple[str, Container]) -> None:

@@ -95,7 +95,6 @@ def detected_face(*, side: int = 640, **overrides: Any) -> DetectedFace:
         "yaw": 0.0,
         "pitch": 0.0,
         "roll": 0.0,
-        "gender": None,
         "embedding": np.full(512, 1 / np.sqrt(512), dtype=np.float32),
     }
     values.update(overrides)
@@ -222,7 +221,6 @@ async def test_uniform_frame_yields_no_face_profile() -> None:
     assert profile.gate_reason is GateReason.NO_FACE
     assert profile.metrics.face_count == 0
     assert profile.embedding == []
-    assert profile.gender is None
 
 
 async def test_sharp_frame_with_face_passes() -> None:
@@ -337,7 +335,6 @@ async def test_real_photo_builds_a_passing_profile() -> None:
     assert profile.metrics.face_count >= 1
     assert profile.metrics.face_side >= REAL_THRESHOLDS.min_face_side
     assert len(profile.embedding) == 512
-    assert profile.gender is not None
 
 
 async def test_real_turned_face_passes_the_gate() -> None:

@@ -81,7 +81,6 @@ class VisionService:
             gate_verdict=gate.verdict,
             gate_reason=gate.reason,
             metrics=metrics,
-            gender=primary.gender if primary else None,
             photo_ref=photo_ref,
         )
         return FaceIngest(profile=profile, face_crop=face_crop)

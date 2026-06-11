@@ -5,12 +5,14 @@ generate → face-check → keep-best → retry, with every knob the retry turns
 derived from the attempt number, never invented per run. The loop is the only
 place a paid generation happens, so the money rules live here too:
 
-- **Budget.** A slot is reserved (atomic ``check_and_incr``) immediately before
-  the generator call it pays for. If that call fails without producing a frame
-  (network, refusal), the reservation is *carried over* to the next attempt
-  rather than burned — budget counts delivered frames, and the store has no
-  refund primitive by design. Exhaustion before any deliverable frame is a
-  clean ``failed``, not an exception.
+- **Budget.** Pay-as-you-go in dollars: a conservative estimate is *reserved*
+  (atomic, via the :class:`~protocols.budget.BudgetMeter`) immediately before
+  the generator call, then *settled* to the real ``usage.cost`` once the
+  provider answers. A transport/4xx failure never charged, so the reservation is
+  *cancelled* (full refund) and the next attempt reserves afresh; a 2xx refusal
+  (no image) may have been billed, so it is settled, not refunded. Exhaustion —
+  the next reservation would exceed the limit — is a clean ``failed``, not an
+  exception.
 - **Write-ahead.** ``provider_request_id`` and ``result_ref`` are checkpointed
   on the session *before* face-check runs: once the provider was paid, the
   frame must be traceable even if the process dies mid-measurement.
@@ -38,7 +40,7 @@ from decimal import Decimal
 
 import structlog
 
-from protocols import EventBus, ImageGenerator, ObjectStorage, StateStore
+from protocols import EventBus, GenerationRefusedError, ImageGenerator, ObjectStorage, StateStore
 from schemas import (
     BestResult,
     EventAdapter,
@@ -49,7 +51,9 @@ from schemas import (
     Iteration,
     IterationResultEvent,
     IterationStartEvent,
+    PaidCallKind,
     Preset,
+    ProviderUsage,
     ResultEvent,
     RetryEvent,
     SessionState,
@@ -58,7 +62,8 @@ from schemas import (
 from services.budget import BudgetService
 from services.facecheck import FaceCheckResult, FaceCheckService
 from services.idempotency import IdempotencyService
-from services.prompt_builder import build_prompt
+from services.pricing import PricingTable
+from services.prompt_builder import BuiltPrompt, build_prompt
 
 logger = structlog.get_logger(__name__)
 
@@ -83,6 +88,11 @@ def _result_ref(session_key: str, n: int) -> str:
     return f"sessions/{session_key}/iterations/{n}"
 
 
+def _usage_cost(usage: ProviderUsage | None) -> Decimal | None:
+    """The billed cost off a usage block, or ``None`` to settle on the estimate."""
+    return usage.cost if usage is not None else None
+
+
 class GenerationLoop:
     """Runs the generate → face-check → keep-best cycle for one session."""
 
@@ -95,11 +105,12 @@ class GenerationLoop:
         generator: ImageGenerator,
         facecheck: FaceCheckService,
         budget: BudgetService,
+        pricing: PricingTable,
         idempotency: IdempotencyService,
         session_ttl_seconds: int,
         face_ttl_seconds: int,
         max_iterations: int,
-        unit_price: Decimal,
+        generation_model: str,
     ) -> None:
         self._store = store
         self._storage = storage
@@ -107,11 +118,12 @@ class GenerationLoop:
         self._generator = generator
         self._facecheck = facecheck
         self._budget = budget
+        self._pricing = pricing
         self._idempotency = idempotency
         self._session_ttl = session_ttl_seconds
         self._face_ttl = face_ttl_seconds
         self._max_iterations = max_iterations
-        self._unit_price = unit_price
+        self._generation_model = generation_model
 
     async def run(
         self,
@@ -180,11 +192,14 @@ class GenerationLoop:
         session.fsm_state = FsmState.GENERATING
         await self._checkpoint(session)
 
+        meter = self._budget.meter(
+            session_key, limit=session.budget_limit, ttl_seconds=self._session_ttl
+        )
+
         # K retries after the first attempt, under the config runaway ceiling.
         max_attempts = min(1 + thresholds.K_max_retries, self._max_iterations)
         failure_reason = _NO_DELIVERABLE
         failure_code = FailureCode.NO_DELIVERABLE
-        reserved = False
 
         for attempt in range(1, max_attempts + 1):
             retrying = attempt > 1
@@ -198,37 +213,75 @@ class GenerationLoop:
                         * _TEMPERATURE_DECAY ** (attempt - 1)
                     }
                 )
+            # The tight face crop strengthens identity; sent on every attempt
+            # (the modest extra input cost buys a real fidelity gain).
+            send_crop = face_crop
 
-            # The reservation is per delivered frame: a transport-failed attempt
-            # left `reserved` standing, and this attempt spends it instead.
-            if not reserved:
-                reserved = await self._budget.reserve_generation(
-                    session_key, limit=session.budget_limit, ttl_seconds=self._session_ttl
-                )
-                if not reserved:
-                    failure_reason = _BUDGET_EXHAUSTED
-                    failure_code = FailureCode.BUDGET_EXHAUSTED
-                    logger.info("generation_loop.budget_exhausted", session_key=session_key, n=n)
-                    break
+            # Reserve a padded estimate for *this* prompt before paying for it;
+            # refusal means the next call would exceed the dollar limit.
+            reservation = await meter.reserve(
+                PaidCallKind.GENERATION, estimate=self._reserve_estimate(built, send_crop=send_crop)
+            )
+            if reservation is None:
+                failure_reason = _BUDGET_EXHAUSTED
+                failure_code = FailureCode.BUDGET_EXHAUSTED
+                logger.info("generation_loop.budget_exhausted", session_key=session_key, n=n)
+                break
 
             await self._bus.publish(session_key, IterationStartEvent(n=n))
 
             try:
-                image, provider_request_id = await self._generator.generate(
+                generated = await self._generator.generate(
                     prompt=built.text,
                     params=params,
                     reference_images=[reference],
-                    face_crop=face_crop if retrying else None,
+                    face_crop=send_crop,
                 )
-            except Exception as exc:  # the port defines no error contract
-                # Nothing was produced: record the attempt uncharged, keep the
-                # reservation for the next one. The connector already retried
-                # transient failures; reaching here means the attempt is dead.
+            except GenerationRefusedError as exc:
+                # 2xx without an image: possibly billed, so settle (not refund)
+                # to the reported cost. The attempt produced nothing — retry.
+                cost = await reservation.settle(_usage_cost(exc.usage))
+                failure_reason = f"generation refused: {exc}"
+                failure_code = FailureCode.GENERATION_FAILED
+                charged = cost > Decimal("0")
+                session.iterations.append(
+                    Iteration(
+                        n=n,
+                        prompt_hash=built.prompt_hash,
+                        prompt_text=built.text,
+                        charged=charged,
+                        cost=cost,
+                        usage=exc.usage,
+                        error=failure_reason,
+                    )
+                )
+                await self._checkpoint(session)
+                logger.warning(
+                    "generation_loop.generate_refused", session_key=session_key, n=n, error=str(exc)
+                )
+                await self._bus.publish(
+                    session_key,
+                    IterationResultEvent(
+                        n=n, charged=charged, cost=cost, error=failure_reason, **preset_meta
+                    ),
+                )
+                if attempt < max_attempts:
+                    await self._bus.publish(session_key, RetryEvent(n=n + 1, reason=failure_reason))
+                continue
+            except Exception as exc:
+                # Transport/4xx: the provider never charged, so refund the whole
+                # reservation. The connector already retried transient failures;
+                # reaching here means the attempt is dead.
+                await reservation.cancel()
                 failure_reason = f"generation failed: {exc}"
                 failure_code = FailureCode.GENERATION_FAILED
                 session.iterations.append(
                     Iteration(
-                        n=n, prompt_hash=built.prompt_hash, charged=False, error=failure_reason
+                        n=n,
+                        prompt_hash=built.prompt_hash,
+                        prompt_text=built.text,
+                        charged=False,
+                        error=failure_reason,
                     )
                 )
                 await self._checkpoint(session)
@@ -244,15 +297,20 @@ class GenerationLoop:
                 if attempt < max_attempts:
                     await self._bus.publish(session_key, RetryEvent(n=n + 1, reason=failure_reason))
                 continue
-            reserved = False  # the slot is now spent on a real frame
 
-            result_ref = await self._storage.put(_result_ref(session_key, n), image)
+            # A delivered frame: settle to the real billed cost (or the reserved
+            # estimate when the provider reported none).
+            cost = await reservation.settle(_usage_cost(generated.usage))
+            result_ref = await self._storage.put(_result_ref(session_key, n), generated.image_bytes)
             iteration = Iteration(
                 n=n,
                 prompt_hash=built.prompt_hash,
-                provider_request_id=provider_request_id,
+                prompt_text=built.text,
+                provider_request_id=generated.provider_request_id,
                 result_ref=result_ref,
-                charged=True,
+                charged=cost > Decimal("0"),
+                cost=cost,
+                usage=generated.usage,
             )
             session.iterations.append(iteration)
             # Write-ahead: the paid frame is traceable (provider id + storage
@@ -261,7 +319,9 @@ class GenerationLoop:
 
             try:
                 check = await self._facecheck.check(
-                    reference_embedding=face.embedding, image=image, thresholds=thresholds
+                    reference_embedding=face.embedding,
+                    image=generated.image_bytes,
+                    thresholds=thresholds,
                 )
             except Exception as exc:
                 # The frame is paid for and already checkpointed (provider id +
@@ -282,7 +342,8 @@ class GenerationLoop:
                     session_key,
                     IterationResultEvent(
                         n=n,
-                        charged=True,
+                        charged=iteration.charged,
+                        cost=iteration.cost,
                         result_ref=result_ref,
                         error=failure_reason,
                         **preset_meta,
@@ -306,7 +367,8 @@ class GenerationLoop:
                     similarity=check.similarity,
                     verdict=check.verdict,
                     risk_level=check.risk_level,
-                    charged=True,
+                    charged=iteration.charged,
+                    cost=iteration.cost,
                     result_ref=result_ref,
                     **preset_meta,
                 ),
@@ -335,6 +397,15 @@ class GenerationLoop:
 
         return await self._finish(session, failure_reason, failure_code)
 
+    def _reserve_estimate(self, built: BuiltPrompt, *, send_crop: bytes | None) -> Decimal:
+        """Padded USD reservation for one generation with this exact prompt."""
+        return self._pricing.generation_reserve(
+            self._generation_model,
+            prompt_chars=len(built.text),
+            reference_count=1,
+            face_detail=built.params.face_media_resolution if send_crop is not None else None,
+        )
+
     async def _load(self, session_key: str) -> tuple[SessionState, FaceProfile]:
         session = await self._store.get_session(session_key)
         if session is None:
@@ -354,11 +425,11 @@ class GenerationLoop:
         Either terminal carries the run's accounting so the business service
         needs no second snapshot read: ``generations_spent`` is the charged
         frames (delivered frames, not provider calls), ``iterations_used`` is
-        every attempt, ``actual_cost`` is the spend.
+        every attempt, ``cost_spent`` is the real dollars billed.
         """
         iterations_used = len(session.iterations)
-        generations_spent = sum(1 for it in session.iterations if it.charged)
-        actual_cost = self._unit_price * generations_spent
+        generations_spent = session.generations_spent()
+        cost_spent = session.cost_spent()
 
         if session.best_result is not None:
             session.fsm_state = FsmState.DONE
@@ -367,7 +438,7 @@ class GenerationLoop:
                 best=session.best_result,
                 iterations_used=iterations_used,
                 generations_spent=generations_spent,
-                actual_cost=actual_cost,
+                cost_spent=cost_spent,
                 preset_id=session.preset_id,
                 preset_version=session.preset_version,
                 library_version=session.library_version,
@@ -382,7 +453,7 @@ class GenerationLoop:
             reason=failure_reason,
             iterations_used=iterations_used,
             generations_spent=generations_spent,
-            actual_cost=actual_cost,
+            cost_spent=cost_spent,
         )
         await self._bus.publish(session.session_key, failed)
         return failed

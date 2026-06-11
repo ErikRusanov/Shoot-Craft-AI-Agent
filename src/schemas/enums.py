@@ -64,16 +64,18 @@ class RiskLevel(StrEnum):
     HIGH = "high"
 
 
-class Gender(StrEnum):
-    """Perceived gender of the input face, as estimated by the CV attribute model.
+class PaidCallKind(StrEnum):
+    """Every upstream call that costs money, so the budget meter can price it.
 
-    The values double as preset ``applies_to.gender`` tokens, so matching is a
-    plain membership test. It is a generation hint (which presets fit), never an
-    identity claim — absent/uncertain stays ``None`` on the profile.
+    One pay-as-you-go limit covers all three: the generation itself, the cheap
+    LLM that fills styling slots, and the cheap LLM that classifies the use case
+    from free text. Naming them lets pricing carry a per-kind reserve estimate
+    and the session record attribute spend to the right line.
     """
 
-    MALE = "male"
-    FEMALE = "female"
+    GENERATION = "generation"
+    SLOT_FILL = "slot_fill"
+    CLASSIFY = "classify"
 
 
 class GateReason(StrEnum):

@@ -12,11 +12,12 @@ import hashlib
 import io
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 
 from PIL import Image
 
 from protocols.generator import GeneratedImage
-from schemas import Generation
+from schemas import Generation, ProviderUsage
 
 
 def _pixel_png() -> bytes:
@@ -40,10 +41,16 @@ class GenerateCall:
 
 
 class FixedImageGenerator:
-    """Returns ``image`` for every call; id is ``fake-<prompt hash>``."""
+    """Returns ``image`` for every call; id is ``fake-<prompt hash>``.
 
-    def __init__(self, image: bytes = _PIXEL_PNG) -> None:
+    ``cost`` (when set) is reported as the provider's billed ``usage.cost`` so the
+    budget settles to a known value; left ``None``, the meter settles on its
+    reserved estimate (the real-provider "no usage" path).
+    """
+
+    def __init__(self, image: bytes = _PIXEL_PNG, *, cost: Decimal | None = None) -> None:
         self.image = image
+        self._cost = cost
         self.calls: list[GenerateCall] = []
 
     async def generate(
@@ -56,7 +63,8 @@ class FixedImageGenerator:
     ) -> GeneratedImage:
         self.calls.append(GenerateCall(prompt, params, len(reference_images), face_crop))
         rid = "fake-" + hashlib.sha256(prompt.encode()).hexdigest()[:16]
-        return GeneratedImage(self.image, rid)
+        usage = None if self._cost is None else ProviderUsage(cost=self._cost)
+        return GeneratedImage(self.image, rid, usage)
 
 
 class FlakyImageGenerator(FixedImageGenerator):

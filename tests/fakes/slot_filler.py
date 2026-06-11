@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from protocols.budget import BudgetMeter
 from protocols.slot_filler import SlotFill
 from schemas import FrameMetrics, Preset
 
@@ -35,8 +36,17 @@ class FixedSlotFiller:
         preset: Preset,
         user_answer: str | None,
         photo_analysis: FrameMetrics | None,
+        meter: BudgetMeter | None = None,
     ) -> SlotFill:
         self.calls.append(FillCall(preset.id, user_answer, photo_analysis))
         if self._fill is not None:
             return self._fill
-        return SlotFill(slots={name: str(s.default) for name, s in preset.slots.items()})
+        # A free-form ask slot (no enum, no default) has no value unless the user
+        # supplied one — mirror DefaultSlotFiller and take the answer verbatim.
+        slots: dict[str, str] = {}
+        for name, slot in preset.slots.items():
+            if slot.default is not None:
+                slots[name] = str(slot.default)
+            elif slot.ask and user_answer is not None:
+                slots[name] = user_answer
+        return SlotFill(slots=slots)

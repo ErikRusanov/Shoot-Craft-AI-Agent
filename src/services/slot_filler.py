@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
+from protocols.budget import BudgetMeter
 from protocols.slot_filler import SlotFill
 from schemas import FrameMetrics, Preset
 
@@ -54,9 +55,10 @@ class DefaultSlotFiller:
         preset: Preset,
         user_answer: str | None,
         photo_analysis: FrameMetrics | None,
+        meter: BudgetMeter | None = None,
     ) -> SlotFill:
-        # photo_analysis is part of the port for the LLM filler's benefit; the
-        # deterministic fallback has no use for it.
+        # photo_analysis and meter are part of the port for the LLM filler's
+        # benefit; the deterministic fallback is free and uses neither.
         slots: dict[str, str] = {}
         for name, slot in preset.slots.items():
             value = slot.default

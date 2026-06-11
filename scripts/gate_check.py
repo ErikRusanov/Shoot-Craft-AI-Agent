@@ -75,8 +75,7 @@ async def main(paths: list[Path]) -> None:
             f"{path.name:30s} {mark:22s} "
             f"faces={m.face_count} frame={m.width}x{m.height} face_side={m.face_side:.0f} "
             f"secondary={m.secondary_face_ratio:.2f} blur={m.blur_var:.0f} "
-            f"bright={m.brightness:.0f} yaw={m.yaw:+.0f} "
-            f"gender={p.gender.value if p.gender else '?'}"
+            f"bright={m.brightness:.0f} yaw={m.yaw:+.0f}"
         )
 
 

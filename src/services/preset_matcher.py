@@ -76,24 +76,34 @@ class PresetLibrary:
     def __len__(self) -> int:
         return len(self._by_id)
 
-    def match(self, *, use_case: str, gender: str) -> Preset | None:
-        """First preset whose ``applies_to`` admits the request, else ``None``.
+    @property
+    def use_case_tokens(self) -> tuple[str, ...]:
+        """Curated ``use_case`` tokens across the library, minus the reserved one.
+
+        The vocabulary the classifier maps free text onto and the ``GET /presets``
+        endpoint advertises; the reserved ``default`` fallback token is excluded —
+        it is never a choice, only a fall-through.
+        """
+        tokens: set[str] = set()
+        for preset in self._by_id.values():
+            tokens.update(t for t in preset.applies_to.use_case if t != _RESERVED_USE_CASE)
+        return tuple(sorted(tokens))
+
+    def match(self, *, use_case: str) -> Preset | None:
+        """First preset whose ``applies_to`` admits ``use_case``, else ``None``.
 
         Intentionally a simple linear filter — the seam for real ranking later.
-        ``any`` in a preset's ``gender`` (or ``use_case``) acts as a wildcard.
-        The reserved fallback is skipped here: it is *never* keyword-matched, only
-        reached via :meth:`resolve` when nothing else admits the request — even a
-        literal ``use_case="default"`` falls through to the fallback, not a match.
+        ``any`` in a preset's ``use_case`` acts as a wildcard. The reserved
+        fallback is skipped here: it is *never* keyword-matched, only reached via
+        :meth:`resolve` when nothing else admits the request — even a literal
+        ``use_case="default"`` falls through to the fallback, not a match.
         """
         for preset in self._by_id.values():
             a = preset.applies_to
             if _RESERVED_USE_CASE in a.use_case:
                 continue  # reserved fallback — reachable only through resolve()
-            if use_case not in a.use_case and "any" not in a.use_case:
-                continue
-            if gender not in a.gender and "any" not in a.gender:
-                continue
-            return preset
+            if use_case in a.use_case or "any" in a.use_case:
+                return preset
         return None
 
     @property
@@ -105,14 +115,15 @@ class PresetLibrary:
         """
         return self._by_id.get(_FALLBACK_ID)
 
-    def resolve(self, *, use_case: str, gender: str) -> Preset | None:
+    def resolve(self, *, use_case: str) -> Preset | None:
         """Best ``applies_to`` match, else the reserved ``default`` fallback.
 
         This is the entry point the orchestration uses: a request that no curated
-        preset admits resolves to the fallback rather than failing. Returns
-        ``None`` only when nothing matches *and* the library ships no fallback.
+        preset admits (including an empty/unknown ``use_case``) resolves to the
+        fallback rather than failing. Returns ``None`` only when nothing matches
+        *and* the library ships no fallback.
         """
-        return self.match(use_case=use_case, gender=gender) or self.fallback
+        return self.match(use_case=use_case) or self.fallback
 
 
 def load_library(settings: Settings) -> PresetLibrary:

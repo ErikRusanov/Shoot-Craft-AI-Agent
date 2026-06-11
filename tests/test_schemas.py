@@ -107,7 +107,14 @@ def _plan() -> Plan:
 
 
 def _cost() -> CostEstimate:
-    return CostEstimate(generations=2, budget_limit=4, note="keep-best within budget")
+    return CostEstimate(
+        generations=2,
+        budget_limit=Decimal("0.50"),
+        per_generation_cost=Decimal("0.069"),
+        llm_overhead_cost=Decimal("0.002"),
+        total_cost=Decimal("0.140"),
+        note="keep-best within budget",
+    )
 
 
 def _best() -> BestResult:
@@ -135,7 +142,7 @@ def _session_state() -> SessionState:
         iterations=[_iteration()],
         thresholds=Thresholds(similarity_threshold=0.62, identity_floor=0.5, K_max_retries=3),
         best_result=_best(),
-        budget_limit=4,
+        budget_limit=Decimal("0.50"),
         created_at=datetime(2026, 6, 9, 12, 0, tzinfo=UTC),
         updated_at=datetime(2026, 6, 9, 12, 5, tzinfo=UTC),
     )
@@ -161,8 +168,8 @@ _ROUND_TRIP_CASES: list[BaseModel] = [
     StartSessionRequest(
         face_key="face_abc",
         use_case="resume",
-        gender="female",
-        budget_limit=4,
+        brief="a resume photo, navy suit",
+        budget_limit=Decimal("0.50"),
         idem_key="k2",
     ),
     StartSessionResponse(
@@ -217,10 +224,10 @@ _EVENT_CASES: list[Event] = [
         best=_best(),
         iterations_used=2,
         generations_spent=2,
-        actual_cost=Decimal("2"),
+        cost_spent=Decimal("0.138"),
         preset_id="demo",
         preset_version="1.0.0",
-        library_version="0.3.0",
+        library_version="0.4.0",
     ),
     FailedEvent(code=FailureCode.INPUT_REJECTED, reason="no face", gate_reason=GateReason.NO_FACE),
     DoneEvent(detail="delivered"),

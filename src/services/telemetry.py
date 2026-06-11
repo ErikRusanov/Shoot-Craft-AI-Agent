@@ -18,8 +18,6 @@ real metrics backend can later replace the logger behind the same call.
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 import structlog
 
 from schemas import SessionState
@@ -27,11 +25,16 @@ from schemas import SessionState
 logger = structlog.get_logger("telemetry")
 
 
+def _token_totals(session: SessionState) -> tuple[int, int]:
+    """Sum prompt/completion tokens across every paid call's usage block."""
+    usages = [it.usage for it in session.iterations] + [c.usage for c in session.llm_calls]
+    prompt = sum(u.prompt_tokens or 0 for u in usages if u is not None)
+    completion = sum(u.completion_tokens or 0 for u in usages if u is not None)
+    return prompt, completion
+
+
 class Telemetry:
     """Emits the per-session outcome event."""
-
-    def __init__(self, *, unit_price: Decimal) -> None:
-        self._unit_price = unit_price
 
     def session_terminal(
         self,
@@ -45,10 +48,11 @@ class Telemetry:
         ``failure_reason``/``failure_code`` come from the caller (graph failure
         payload, wall-clock timeout, cancel) — the session record itself does
         not store them. ``failure_code`` is the machine-readable axis for
-        aggregation; ``failure_reason`` is free-text detail.
+        aggregation; ``failure_reason`` is free-text detail. ``cost`` is the real
+        dollars billed (``usage.cost``), not a unit-price multiple.
         """
-        charged = sum(1 for it in session.iterations if it.charged)
         best = session.best_result
+        prompt_tokens, completion_tokens = _token_totals(session)
         logger.info(
             "session_terminal",
             fsm_state=session.fsm_state.value,
@@ -58,9 +62,12 @@ class Telemetry:
             slots=dict(session.slots),
             n_iterations=len(session.iterations),
             n_retries=max(0, len(session.iterations) - 1),
-            generations_charged=charged,
-            budget_limit=session.budget_limit,
-            cost=str(self._unit_price * charged),
+            generations_charged=session.generations_spent(),
+            n_llm_calls=len(session.llm_calls),
+            budget_limit=str(session.budget_limit),
+            cost=str(session.cost_spent()),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             best_similarity=best.similarity if best else None,
             verdict=best.verdict.value if best else None,
             risk_level=best.risk_level.value if best else None,

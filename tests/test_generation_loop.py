@@ -8,7 +8,8 @@ fake, and state/budget/idempotency sit on the in-memory store. What is pinned:
 - below ``identity_floor`` nothing is ever delivered;
 - budget exhaustion ends in a clean ``failed`` (or delivers the existing best);
 - retries stop at K (and at the config runaway ceiling);
-- a transport failure costs no budget slot;
+- a transport failure refunds its reservation (costs nothing);
+- a delivered frame settles to the provider's billed cost;
 - re-entry with the same ``idem_key`` replays the recorded outcome;
 - the paid frame is checkpointed (provider id + result ref) before face-check.
 """
@@ -45,6 +46,7 @@ from services.budget import BudgetService
 from services.facecheck import FaceCheckService
 from services.generation_loop import IDENTITY_EMPHASIS, GenerationLoop
 from services.idempotency import IdempotencyService
+from services.pricing import PricingTable
 from tests.fakes import (
     FixedImageGenerator,
     FlakyImageGenerator,
@@ -56,8 +58,11 @@ from tests.fakes import (
 )
 
 TTL = 3600
-UNIT_PRICE = Decimal("1")
-LIBRARY_VERSION = "0.3.0"
+GEN_MODEL = "gen-model"
+PRICING = PricingTable.default(generation_model=GEN_MODEL, lite_model="lite-model")
+# A known billed cost so the budget settles to a predictable spend.
+GEN_COST = Decimal("0.05")
+LIBRARY_VERSION = "0.4.0"
 SESSION_KEY = "sess-1"
 FACE_KEY = "face-1"
 PHOTO_REF = "photos/face-1"
@@ -87,7 +92,7 @@ def make_preset(*, k: int = 3, temperature: float = 0.4) -> Preset:
     return Preset(
         id="test_avatar",
         version="1.0.0",
-        applies_to=AppliesTo(use_case=["avatar"], gender=["male", "female"]),
+        applies_to=AppliesTo(use_case=["avatar"]),
         identity_instruction=IDENTITY_INSTRUCTION,
         prompt_structure=PROMPT_STRUCTURE,
         negative_prompt="cartoon, different person",
@@ -142,29 +147,14 @@ class Harness:
         assert session is not None
         return session
 
-    async def assert_budget_consumed(self, expected: int) -> None:
-        """Pin the exact counter value via two probes (the port has no read).
-
-        Refusing at ``limit=expected`` proves ``used >= expected`` (a refusal
-        does not increment); accepting at ``limit=expected + 1`` then proves
-        ``used == expected``. The second probe's own increment lands after
-        every assertion that matters.
-        """
-        store = self.store
-        assert not await store.check_and_incr_budget(
-            SESSION_KEY, limit=expected, ttl_seconds=TTL
-        ), f"budget counter is below {expected}"
-        assert await store.check_and_incr_budget(
-            SESSION_KEY, limit=expected + 1, ttl_seconds=TTL
-        ), f"budget counter is above {expected}"
-
 
 async def make_harness(
     *,
     similarities: list[float | None] | None = None,
     embedder: Embedder | None = None,
     generator: FixedImageGenerator | None = None,
-    budget_limit: int = 10,
+    budget_limit: Decimal = Decimal("10"),
+    gen_cost: Decimal | None = GEN_COST,
     k: int = 3,
     max_iterations: int = 8,
     temperature: float = 0.4,
@@ -172,7 +162,7 @@ async def make_harness(
     store = InMemoryStateStore()
     storage = InMemoryObjectStorage()
     bus = RecordingBus()
-    gen = generator if generator is not None else FixedImageGenerator()
+    gen = generator if generator is not None else FixedImageGenerator(cost=gen_cost)
     preset = make_preset(k=k, temperature=temperature)
 
     await storage.put(PHOTO_REF, REFERENCE_PHOTO)
@@ -198,12 +188,13 @@ async def make_harness(
         bus=bus,
         generator=gen,
         facecheck=FaceCheckService(emb),
-        budget=BudgetService(store),
+        budget=BudgetService(store, PRICING),
+        pricing=PRICING,
         idempotency=IdempotencyService(store),
         session_ttl_seconds=TTL,
         face_ttl_seconds=TTL,
         max_iterations=max_iterations,
-        unit_price=UNIT_PRICE,
+        generation_model=GEN_MODEL,
     )
     return Harness(loop=loop, store=store, storage=storage, bus=bus, generator=gen, preset=preset)
 
@@ -222,24 +213,24 @@ async def test_first_attempt_passes_and_delivers() -> None:
     assert result.best.risk_level is RiskLevel.LOW
     assert await h.storage.get(result.best.result_ref) == h.generator.image
 
-    # The terminal is self-sufficient: spend and the preset triple travel with
-    # it, no second snapshot read needed.
+    # The terminal is self-sufficient: spend and the preset triple travel with it.
     assert result.iterations_used == 1
     assert result.generations_spent == 1
-    assert result.actual_cost == UNIT_PRICE
+    assert result.cost_spent == GEN_COST  # settled to the provider's billed cost
     assert result.preset_id == h.preset.id
     assert result.preset_version == h.preset.version
     assert result.library_version == LIBRARY_VERSION
 
     assert len(h.generator.calls) == 1
     assert h.generator.calls[0].reference_count == 1
-    assert h.generator.calls[0].face_crop is None  # first attempt: plain reference
 
     session = await h.session()
     assert session.fsm_state is FsmState.DONE
     assert [it.charged for it in session.iterations] == [True]
+    assert session.iterations[0].cost == GEN_COST
+    assert session.iterations[0].prompt_text is not None  # full prompt kept for debugging
+    assert session.cost_spent() == GEN_COST
     assert h.bus.types == ["iteration_start", "iteration_result", "result"]
-    await h.assert_budget_consumed(1)
 
 
 async def test_soft_then_pass_keeps_the_better_frame() -> None:
@@ -250,6 +241,7 @@ async def test_soft_then_pass_keeps_the_better_frame() -> None:
     assert result.best.iteration_n == 2
     assert result.best.verdict is Verdict.PASSED
     assert len(h.generator.calls) == 2  # stopped on pass, not on K
+    assert result.cost_spent == GEN_COST * 2
     assert h.bus.types == [
         "iteration_start",
         "iteration_result",
@@ -258,7 +250,6 @@ async def test_soft_then_pass_keeps_the_better_frame() -> None:
         "iteration_result",
         "result",
     ]
-    await h.assert_budget_consumed(2)
 
     face = await h.store.get_face(FACE_KEY)
     assert face is not None
@@ -315,8 +306,9 @@ async def test_below_floor_is_never_delivered() -> None:
     session = await h.session()
     assert session.best_result is None
     assert session.fsm_state is FsmState.FAILED
-    # Paid attempts stay paid even when undeliverable — no refunds.
-    await h.assert_budget_consumed(3)
+    # Paid attempts stay paid even when undeliverable — no refunds for delivered frames.
+    assert session.generations_spent() == 3
+    assert result.cost_spent == GEN_COST * 3
 
 
 async def test_frame_that_lost_the_face_is_below_floor() -> None:
@@ -336,7 +328,7 @@ async def test_frame_that_lost_the_face_is_below_floor() -> None:
 
 
 async def test_zero_budget_fails_cleanly_without_generating() -> None:
-    h = await make_harness(similarities=[], budget_limit=0)
+    h = await make_harness(similarities=[], budget_limit=Decimal("0"))
     result = await h.run()
 
     assert isinstance(result, FailedEvent)
@@ -347,9 +339,9 @@ async def test_zero_budget_fails_cleanly_without_generating() -> None:
 
 
 async def test_budget_exhaustion_mid_loop_delivers_the_kept_best() -> None:
-    # Two paid soft attempts, then the third reservation is refused: the loop
-    # must stop and ship the best soft frame instead of erroring out.
-    h = await make_harness(similarities=[0.6, 0.7], budget_limit=2, k=5)
+    # ~$0.078 reserved per generation: a $0.15 budget admits two, then the third
+    # reservation is refused — the loop ships the best soft frame, not an error.
+    h = await make_harness(similarities=[0.6, 0.7], budget_limit=Decimal("0.15"), k=5)
     result = await h.run()
 
     assert isinstance(result, ResultEvent)
@@ -357,14 +349,16 @@ async def test_budget_exhaustion_mid_loop_delivers_the_kept_best() -> None:
     assert result.best.similarity == pytest.approx(0.7, abs=1e-6)
     assert result.best.verdict is Verdict.SOFT
     assert len(h.generator.calls) == 2
-    await h.assert_budget_consumed(2)
+    assert result.cost_spent == GEN_COST * 2
 
 
 async def test_network_failure_does_not_eat_budget() -> None:
-    # With budget for exactly one generation, a transport failure on the first
-    # call must leave the slot for the retry — which then succeeds.
+    # A transport failure refunds its reservation, so the retry can reserve again
+    # — even on a budget barely above one generation's padded estimate.
     h = await make_harness(
-        similarities=[0.9], generator=FlakyImageGenerator(failures=1), budget_limit=1
+        similarities=[0.9],
+        generator=FlakyImageGenerator(failures=1),
+        budget_limit=Decimal("0.10"),
     )
     result = await h.run()
 
@@ -375,9 +369,8 @@ async def test_network_failure_does_not_eat_budget() -> None:
     assert [it.charged for it in session.iterations] == [False, True]
     assert session.iterations[0].provider_request_id is None
     assert session.iterations[0].result_ref is None
+    assert session.iterations[0].cost == Decimal("0")  # refunded, costs nothing
     assert session.iterations[0].error is not None  # the dead attempt is explained
-    # The failed attempt is on the stream too — the event count matches the
-    # recorded attempts, so spend-per-retry is readable from the stream alone.
     assert h.bus.types == [
         "iteration_start",
         "iteration_result",
@@ -386,12 +379,11 @@ async def test_network_failure_does_not_eat_budget() -> None:
         "iteration_result",
         "result",
     ]
-    await h.assert_budget_consumed(1)
 
 
 async def test_persistent_generator_failure_fails_cleanly() -> None:
     h = await make_harness(
-        similarities=[], generator=FlakyImageGenerator(failures=99), budget_limit=5, k=1
+        similarities=[], generator=FlakyImageGenerator(failures=99), budget_limit=Decimal("10"), k=1
     )
     result = await h.run()
 
@@ -400,16 +392,15 @@ async def test_persistent_generator_failure_fails_cleanly() -> None:
     session = await h.session()
     assert [it.charged for it in session.iterations] == [False, False]
     assert (await h.session()).fsm_state is FsmState.FAILED
-    # One slot was reserved up front and carried across both dead attempts;
-    # it is lost with the session (no refunds), but never multiplied.
-    await h.assert_budget_consumed(1)
+    # Every dead attempt refunded its reservation — nothing was billed.
+    assert result.cost_spent == Decimal("0")
 
 
 # --- retry policy ---
 
 
 async def test_k_max_retries_is_respected() -> None:
-    h = await make_harness(similarities=[0.6] * 4, k=3, budget_limit=99)
+    h = await make_harness(similarities=[0.6] * 4, k=3, budget_limit=Decimal("10"))
     result = await h.run()
 
     assert isinstance(result, ResultEvent)  # soft keep-best ships when K runs out
@@ -429,12 +420,13 @@ async def test_retry_strengthens_reference_without_rewriting_the_prompt() -> Non
 
     first, second = h.generator.calls
 
-    # Attempt 1: the plain built prompt, preset knobs untouched, no crop.
+    # Attempt 1: the plain built prompt, preset knobs untouched. The face crop is
+    # now attached from the first attempt (identity boost), not only on retry.
     assert IDENTITY_EMPHASIS not in first.prompt
     assert first.params.temperature == pytest.approx(0.4)
-    assert first.face_crop is None
+    assert first.face_crop == b"tight-face-crop"
 
-    # Retry: identity emphasis appended, temperature halved, face crop attached.
+    # Retry: identity emphasis appended, temperature halved, crop still attached.
     assert IDENTITY_EMPHASIS in second.prompt
     assert second.params.temperature == pytest.approx(0.2)
     assert second.face_crop == b"tight-face-crop"
@@ -460,7 +452,6 @@ async def test_idempotent_reentry_replays_the_same_result() -> None:
     assert second == first
     assert len(h.generator.calls) == 1
     assert h.bus.types.count("result") == 1  # replay does not re-emit
-    await h.assert_budget_consumed(1)
 
 
 async def test_distinct_idem_keys_run_independently() -> None:
@@ -488,7 +479,7 @@ async def test_missing_reference_photo_fails_cleanly() -> None:
     assert result.code is FailureCode.REFERENCE_MISSING
     assert h.generator.calls == []  # nothing paid for
     assert (await h.session()).fsm_state is FsmState.FAILED
-    await h.assert_budget_consumed(0)
+    assert result.cost_spent == Decimal("0")
 
 
 # --- write-ahead ---
@@ -511,8 +502,10 @@ async def test_paid_frame_is_checkpointed_before_facecheck() -> None:
     session = await h.session()
     first = session.iterations[0]
     # The crash hit *after* the paid frame became traceable: the checkpoint
-    # already carries the provider request id and the stored result ref.
+    # already carries the provider request id and the stored result ref, and the
+    # reservation was settled (the frame was billed).
     assert first.charged is True
+    assert first.cost == GEN_COST
     assert first.provider_request_id is not None
     assert first.result_ref == f"sessions/{SESSION_KEY}/iterations/1"
     assert await h.storage.get(first.result_ref) == h.generator.image

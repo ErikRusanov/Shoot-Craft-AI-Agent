@@ -78,17 +78,31 @@ async def test_answer_never_steers_non_ask_slots(headshot: Preset) -> None:
 
 async def test_freeform_ask_slot_takes_answer_verbatim(fallback: Preset) -> None:
     # The fallback's `scene` is free-form (no enum): the user's own words fill it,
-    # not snapped to a vocabulary. Non-ask enum slots still resolve to defaults.
+    # not snapped to a vocabulary.
     answer = "on a windswept cliff overlooking the sea at dusk"
     fill = await DefaultSlotFiller().fill(preset=fallback, user_answer=answer, photo_analysis=None)
     assert fill.slots["scene"] == answer
-    assert fill.slots["lighting"] == str(fallback.slots["lighting"].default)
 
 
-async def test_freeform_ask_slot_without_answer_uses_default(fallback: Preset) -> None:
-    fill = await DefaultSlotFiller().fill(preset=fallback, user_answer=None, photo_analysis=None)
-    assert fill.slots["scene"] == str(fallback.slots["scene"].default)
-    assert fill.slots["scene"] != "None"
+async def test_freeform_ask_slot_without_answer_raises() -> None:
+    # The fallback's scene has NO default on purpose: a missing description must
+    # surface (the graph asks), never silently become a generic phrase. The
+    # filler has nothing to fill it with and refuses.
+    from schemas import AppliesTo, Generation, Preset, Slot, Thresholds
+
+    preset = Preset(
+        id="default",
+        version="1.0.0",
+        applies_to=AppliesTo(use_case=["default"]),
+        identity_instruction="Reproduce the exact person.",
+        prompt_structure="Apply only: {scene}.",
+        negative_prompt="different person",
+        slots={"scene": Slot(required=True, ask=True)},
+        generation=Generation(temperature=0.2, aspect_ratio="3:4", face_media_resolution="high"),
+        thresholds=Thresholds(similarity_threshold=0.6, identity_floor=0.5, K_max_retries=3),
+    )
+    with pytest.raises(ValueError, match="no default and no match"):
+        await DefaultSlotFiller().fill(preset=preset, user_answer=None, photo_analysis=None)
 
 
 async def test_every_slot_filled_and_in_vocabulary(library: PresetLibrary) -> None:

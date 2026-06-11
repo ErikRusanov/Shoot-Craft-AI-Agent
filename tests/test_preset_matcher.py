@@ -39,33 +39,33 @@ def test_get_and_match(library: PresetLibrary) -> None:
     assert library.get("demo_avatar") is not None
     assert library.get("nope") is None
 
-    hit = library.match(use_case="resume", gender="female")
+    hit = library.match(use_case="resume")
     assert hit is not None and hit.id == "demo_headshot"
 
     # An unknown use_case yields no match (not an exception); the bare filter
     # does not fall back — resolve() does.
-    assert library.match(use_case="underwater-ballet", gender="male") is None
+    assert library.match(use_case="underwater-ballet") is None
 
 
 def test_resolve_falls_back_to_default(library: PresetLibrary) -> None:
     # Nothing curated admits this request, so resolve() returns the fallback.
-    assert library.match(use_case="underwater-ballet", gender="male") is None
-    resolved = library.resolve(use_case="underwater-ballet", gender="male")
+    assert library.match(use_case="underwater-ballet") is None
+    resolved = library.resolve(use_case="underwater-ballet")
     assert resolved is not None and resolved.id == "default"
 
 
 def test_resolve_prefers_a_real_match(library: PresetLibrary) -> None:
     # When something curated matches, resolve() returns it, not the fallback.
-    resolved = library.resolve(use_case="avatar", gender="male")
+    resolved = library.resolve(use_case="avatar")
     assert resolved is not None and resolved.id == "demo_avatar"
 
 
 def test_default_token_is_never_keyword_matched(library: PresetLibrary) -> None:
     # The reserved token is excluded from the filter: even asking for it by name
     # reaches the fallback only through resolve(), never as a keyword match.
-    assert library.match(use_case="default", gender="male") is None
+    assert library.match(use_case="default") is None
     assert library.fallback is not None and library.fallback.id == "default"
-    resolved = library.resolve(use_case="default", gender="male")
+    resolved = library.resolve(use_case="default")
     assert resolved is not None and resolved.id == "default"
 
 
@@ -76,7 +76,7 @@ def test_no_fallback_returns_none(tmp_path: Path) -> None:
     settings = Settings(_env_file=None, preset_source="path", preset_library_path=str(tmp_path))
     library = load_library(settings)
     assert library.fallback is None
-    assert library.resolve(use_case="nope", gender="male") is None
+    assert library.resolve(use_case="nope") is None
 
 
 def test_reserved_token_on_non_default_fails_loudly(tmp_path: Path) -> None:
@@ -138,9 +138,9 @@ def test_path_source_requires_path() -> None:
 
 def test_match_is_deterministic(library: PresetLibrary) -> None:
     fresh = load_library(Settings(_env_file=None))
-    for use_case, gender in [("avatar", "male"), ("resume", "female")]:
-        a = library.match(use_case=use_case, gender=gender)
-        b = fresh.match(use_case=use_case, gender=gender)
+    for use_case in ("avatar", "resume"):
+        a = library.match(use_case=use_case)
+        b = fresh.match(use_case=use_case)
         assert a is not None and b is not None and a.id == b.id
 
 

@@ -37,7 +37,6 @@ class Slot(_Strict):
 
 class AppliesTo(_Strict):
     use_case: list[str]
-    gender: list[str]
 
 
 class Generation(_Strict):
@@ -90,8 +89,9 @@ class Composition(_Strict):
 class Preset(_Strict):
     # Contract version of this shape; absent in YAML → defaults. Bump only on a
     # breaking change to the preset schema itself, not on a library content edit.
-    # v2: dropped applies_to.age — matching is use_case/gender only.
-    schema_v: int = 2
+    # v2: dropped applies_to.age. v3: dropped applies_to.gender — the face comes
+    # from the reference, so matching is use_case only.
+    schema_v: int = 3
     id: str
     version: str
     applies_to: AppliesTo

@@ -212,17 +212,27 @@ async def test_no_inputs_skips_the_llm_entirely(headshot: Preset) -> None:
     )
 
 
-async def test_freeform_scene_value_kept_verbatim(
+async def test_freeform_scene_is_the_users_words_not_the_llm_paraphrase(
     fallback_preset: Preset, metrics: FrameMetrics
 ) -> None:
     filler, _ = _filler(_llm_ok(fallback_preset))
 
-    fill = await filler.fill(
-        preset=fallback_preset,
-        user_answer="на крыше на закате",
-        photo_analysis=metrics,
-    )
+    answer = "на крыше на закате"
+    fill = await filler.fill(preset=fallback_preset, user_answer=answer, photo_analysis=metrics)
 
-    # The free-form slot has no vocabulary to snap to; the LLM's scene text is
-    # passed through — the prompt builder is the trust boundary that sanitizes it.
-    assert fill.slots["scene"] == "on a quiet rooftop at dusk"
+    # The LLM answered "on a quiet rooftop at dusk" for the free-form scene, but
+    # the user's own words win — paraphrasing is exactly the bug this prevents.
+    assert fill.slots["scene"] == answer
+
+
+async def test_edit_request_brief_passes_through_verbatim(
+    fallback_preset: Preset, metrics: FrameMetrics
+) -> None:
+    # The sandbox regression: an edit request must reach the model verbatim, not
+    # be rewritten into a generic "flattering setting" scene.
+    filler, _ = _filler(_llm_ok(fallback_preset))
+
+    answer = "do not change the photo, make the background blue light"
+    fill = await filler.fill(preset=fallback_preset, user_answer=answer, photo_analysis=metrics)
+
+    assert fill.slots["scene"] == answer

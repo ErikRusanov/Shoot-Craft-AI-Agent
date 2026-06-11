@@ -13,7 +13,8 @@ from services.connectors.fake import FakeFaceEngine, FakeImageGenerator
 from services.connectors.insightface_embedder import InsightFaceEmbedder
 from services.connectors.local_storage import LocalObjectStorage
 from services.connectors.memory_store import InMemoryEventBus, InMemoryStateStore
-from services.connectors.openrouter_client import OpenRouterClient
+from services.connectors.openrouter_classifier import OpenRouterUseCaseClassifier
+from services.connectors.openrouter_client import OpenRouterClient, parse_usage
 from services.connectors.openrouter_generator import (
     NoImageGeneratedError,
     OpenRouterImageGenerator,
@@ -35,8 +36,10 @@ __all__ = [
     "OpenRouterClient",
     "OpenRouterImageGenerator",
     "OpenRouterSlotFiller",
+    "OpenRouterUseCaseClassifier",
     "RedisEventBus",
     "RedisStateStore",
     "S3ObjectStorage",
     "ThrottledImageGenerator",
+    "parse_usage",
 ]

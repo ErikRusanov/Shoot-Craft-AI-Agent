@@ -27,7 +27,6 @@ from numpy.typing import NDArray
 from PIL import Image, ImageOps
 
 from protocols import DetectedFace
-from schemas import Gender
 from utils import images
 
 
@@ -102,18 +101,16 @@ class InsightFaceEmbedder:
         # after the shift — metrics clamp it (vision) and crops clamp it
         # (utils.images), so it is kept as-is here.
         x1, y1, x2, y2 = (float(v) - offset for v in face.bbox)
-        # landmark_3d_68 sets pose as [pitch, yaw, roll] degrees; genderage sets
-        # gender (1=male). Either model may be absent from a slim pack. The
-        # pack's age estimate is dropped at this boundary — see DetectedFace.
+        # landmark_3d_68 sets pose as [pitch, yaw, roll] degrees; it may be
+        # absent from a slim pack. The pack's age/gender estimates are dropped at
+        # this boundary — see DetectedFace.
         pose = face.get("pose")
         pitch, yaw, roll = (float(v) for v in pose) if pose is not None else (0.0, 0.0, 0.0)
-        raw_gender = face.get("gender")
         return DetectedFace(
             bbox=(x1, y1, x2, y2),
             det_score=float(face.det_score),
             yaw=yaw,
             pitch=pitch,
             roll=roll,
-            gender=None if raw_gender is None else (Gender.MALE if raw_gender else Gender.FEMALE),
             embedding=np.asarray(face.normed_embedding, dtype=np.float32),
         )

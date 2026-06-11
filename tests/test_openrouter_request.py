@@ -134,7 +134,7 @@ async def test_no_face_crop_sends_no_extra_part(params: Generation) -> None:
 async def test_parses_base64_image_and_request_id(params: Generation) -> None:
     generator, _ = _generator(_ok())
 
-    image_bytes, request_id = await generator.generate(
+    image_bytes, request_id, _usage = await generator.generate(
         prompt=PROMPT, params=params, reference_images=[REFERENCE]
     )
 

@@ -74,10 +74,24 @@ def test_telemetry_event_is_deidentified() -> None:
         preset_version="1.0.0",
         library_version="examples",
         slots={"purpose": "a general profile avatar"},
-        budget_limit=4,
+        budget_limit=Decimal("0.50"),
         iterations=[
-            Iteration(n=1, prompt_hash="h1", charged=True, similarity=0.5, verdict=Verdict.SOFT),
-            Iteration(n=2, prompt_hash="h1", charged=True, similarity=0.8, verdict=Verdict.PASSED),
+            Iteration(
+                n=1,
+                prompt_hash="h1",
+                charged=True,
+                cost=Decimal("0.05"),
+                similarity=0.5,
+                verdict=Verdict.SOFT,
+            ),
+            Iteration(
+                n=2,
+                prompt_hash="h1",
+                charged=True,
+                cost=Decimal("0.069"),
+                similarity=0.8,
+                verdict=Verdict.PASSED,
+            ),
         ],
         best_result=BestResult(
             iteration_n=2,
@@ -89,7 +103,7 @@ def test_telemetry_event_is_deidentified() -> None:
     )
 
     with capture_logs() as captured:
-        Telemetry(unit_price=Decimal("2.5")).session_terminal(session)
+        Telemetry().session_terminal(session)
 
     [event] = captured
     assert event["event"] == "session_terminal"
@@ -99,7 +113,7 @@ def test_telemetry_event_is_deidentified() -> None:
     assert event["n_iterations"] == 2
     assert event["n_retries"] == 1
     assert event["generations_charged"] == 2
-    assert event["cost"] == "5.0"
+    assert event["cost"] == "0.119"  # real billed dollars, 0.05 + 0.069
     assert event["best_similarity"] == 0.8
     assert event["verdict"] == "passed"
     assert event["risk_level"] == "low"
@@ -115,9 +129,7 @@ def test_telemetry_event_is_deidentified() -> None:
 def test_telemetry_failure_reason_passthrough() -> None:
     session = SessionState(session_key="s1", face_key="f1", fsm_state=FsmState.CANCELLED)
     with capture_logs() as captured:
-        Telemetry(unit_price=Decimal("1")).session_terminal(
-            session, failure_reason="cancelled by the caller"
-        )
+        Telemetry().session_terminal(session, failure_reason="cancelled by the caller")
     [event] = captured
     assert event["fsm_state"] == "cancelled"
     assert event["failure_reason"] == "cancelled by the caller"

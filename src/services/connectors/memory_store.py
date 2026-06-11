@@ -29,7 +29,7 @@ class InMemoryStateStore:
         self._sessions: dict[str, SessionState] = {}
         self._locks: dict[str, str] = {}  # key -> holder token
         self._idem: dict[str, bytes] = {}
-        self._budget: dict[str, int] = {}  # session_key -> used count
+        self._budget: dict[str, int] = {}  # session_key -> micro-USD spent
 
     # --- face profile ---
     async def get_face(self, face_key: str) -> FaceProfile | None:
@@ -69,15 +69,20 @@ class InMemoryStateStore:
         self._idem[key] = value
         return True
 
-    # --- budget (atomic) ---
-    async def check_and_incr_budget(
-        self, session_key: str, *, limit: int, ttl_seconds: int
+    # --- budget (reserve/settle, atomic) ---
+    async def budget_reserve(
+        self, session_key: str, *, estimate_micro: int, limit_micro: int, ttl_seconds: int
     ) -> bool:
         used = self._budget.get(session_key, 0)
-        if used >= limit:
+        if used + estimate_micro > limit_micro:
             return False
-        self._budget[session_key] = used + 1
+        self._budget[session_key] = used + estimate_micro
         return True
+
+    async def budget_adjust(self, session_key: str, *, delta_micro: int, ttl_seconds: int) -> int:
+        new = max(0, self._budget.get(session_key, 0) + delta_micro)
+        self._budget[session_key] = new
+        return new
 
 
 class InMemoryEventBus:

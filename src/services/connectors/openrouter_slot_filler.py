@@ -25,22 +25,22 @@ from typing import Any
 
 import structlog
 
+from protocols.budget import BudgetMeter
 from protocols.slot_filler import SlotFill, SlotFiller
-from schemas import FrameMetrics, Preset
-from services.connectors.openrouter_client import OpenRouterClient
+from schemas import FrameMetrics, PaidCallKind, Preset
+from services.connectors.openrouter_client import OpenRouterClient, parse_usage
 from services.slot_filler import DefaultSlotFiller
 
 log = structlog.get_logger(__name__)
 
 _SYSTEM_PROMPT = (
-    "You resolve styling slots for a photo-generation prompt. For every slot you "
-    "are given, choose exactly one value: if the slot lists allowed options, the "
-    "value MUST be one of them, chosen to best fit the user's answer and the photo "
-    "metrics; otherwise keep the slot's default. A slot without options is a scene "
-    "description — fill it from the user's own words, in English, describing only "
-    "the scene. The addendum is at most one short sentence of extra scene detail "
-    "(lighting, mood); leave it empty unless the user's answer clearly asks for it. "
-    "Never describe or modify the person's face or identity."
+    "You resolve styling slots for a photo-generation prompt. For every slot that "
+    "lists allowed options, choose exactly one of them, the best fit for the user's "
+    "answer and the photo metrics. A slot without options is a free-form scene "
+    "description: copy the user's own words into it verbatim, unchanged. The "
+    "addendum is at most one short sentence of extra scene detail (lighting, mood); "
+    "leave it empty unless the user's answer clearly asks for it. Never describe or "
+    "modify the person's face or identity."
 )
 
 # Hard ceilings via the schema, not trust: the addendum lands in the prompt
@@ -114,6 +114,27 @@ def _parse_fill(preset: Preset, body: dict[str, Any]) -> SlotFill:
     return SlotFill(slots=slots, addendum=addendum.strip()[:_ADDENDUM_MAX_LEN])
 
 
+def _verbatim_freeform(
+    preset: Preset, slots: dict[str, str], user_answer: str | None
+) -> dict[str, str]:
+    """Replace every free-form (enum-less) slot with the user's own words.
+
+    The LLM resolves enum slots and the addendum; a free-form slot must carry the
+    user's text *verbatim*, never the model's paraphrase — paraphrasing is exactly
+    how "do not change photo, make background blue light" became a generic scene.
+    The prompt builder's injection sanitizer is the only filter on this text.
+    """
+    out = dict(slots)
+    for name, slot in preset.slots.items():
+        if slot.enum is not None:
+            continue
+        if slot.ask and user_answer is not None:
+            out[name] = user_answer
+        elif slot.default is not None:
+            out[name] = str(slot.default)
+    return out
+
+
 class OpenRouterSlotFiller:
     """SlotFiller that asks a cheap LLM, falling back to the deterministic filler."""
 
@@ -134,21 +155,42 @@ class OpenRouterSlotFiller:
         preset: Preset,
         user_answer: str | None,
         photo_analysis: FrameMetrics | None,
+        meter: BudgetMeter | None = None,
     ) -> SlotFill:
         if user_answer is None and photo_analysis is None:
             # Nothing to interpret — the LLM would only restate the defaults.
             return await self._fallback.fill(
-                preset=preset, user_answer=user_answer, photo_analysis=photo_analysis
+                preset=preset, user_answer=user_answer, photo_analysis=photo_analysis, meter=meter
+            )
+        # Reserve the dollar slot before the paid call; a refused budget degrades
+        # to the free deterministic fill rather than failing the session.
+        reservation = None if meter is None else await meter.reserve(PaidCallKind.SLOT_FILL)
+        if meter is not None and reservation is None:
+            log.warning("slot_filler_budget_exhausted", preset_id=preset.id)
+            return await self._fallback.fill(
+                preset=preset, user_answer=user_answer, photo_analysis=photo_analysis, meter=meter
             )
         try:
             payload = self._payload(preset, user_answer, photo_analysis)
-            return _parse_fill(preset, await self._client.chat_completion(payload))
+            body = await self._client.chat_completion(payload)
+            fill = _parse_fill(preset, body)
+            # Free-form slots are taken verbatim from the user, never the LLM's
+            # rephrasing — even when structured output complied.
+            fill = fill._replace(slots=_verbatim_freeform(preset, fill.slots, user_answer))
+            usage = parse_usage(body)
+            if reservation is None:
+                return fill
+            cost = await reservation.settle(usage.cost if usage is not None else None)
+            return fill._replace(usage=usage, cost=cost)
         # Deliberately broad: whatever the LLM path did wrong, the session
-        # degrades to the deterministic filler instead of breaking.
+        # degrades to the deterministic filler instead of breaking. The provider
+        # did not deliver a usable result, so the reservation is refunded.
         except Exception as exc:
+            if reservation is not None:
+                await reservation.cancel()
             log.warning("slot_filler_llm_fallback", preset_id=preset.id, error=repr(exc))
             return await self._fallback.fill(
-                preset=preset, user_answer=user_answer, photo_analysis=photo_analysis
+                preset=preset, user_answer=user_answer, photo_analysis=photo_analysis, meter=meter
             )
 
     def _payload(

@@ -14,12 +14,22 @@ from schemas.contract import (
     IngestPhotoRequest,
     IngestPhotoResponse,
     InputAnswerRequest,
+    PresetAsk,
+    PresetCatalog,
+    PresetSummary,
     SessionAck,
     SessionSnapshot,
     StartSessionRequest,
     StartSessionResponse,
 )
-from schemas.enums import FailureCode, FsmState, GateReason, Gender, RiskLevel, Verdict
+from schemas.enums import (
+    FailureCode,
+    FsmState,
+    GateReason,
+    PaidCallKind,
+    RiskLevel,
+    Verdict,
+)
 from schemas.events import (
     CostEvent,
     DoneEvent,
@@ -51,7 +61,9 @@ from schemas.state import (
     FaceProfile,
     FrameMetrics,
     Iteration,
+    PaidCallRecord,
     Plan,
+    ProviderUsage,
     SessionState,
 )
 
@@ -74,7 +86,6 @@ __all__ = [
     "FrameMetrics",
     "FsmState",
     "GateReason",
-    "Gender",
     "Generation",
     "IngestPhotoRequest",
     "IngestPhotoResponse",
@@ -83,9 +94,15 @@ __all__ = [
     "IterationResultEvent",
     "IterationStartEvent",
     "NeedInputEvent",
+    "PaidCallKind",
+    "PaidCallRecord",
     "Plan",
     "PlanEvent",
     "Preset",
+    "PresetAsk",
+    "PresetCatalog",
+    "PresetSummary",
+    "ProviderUsage",
     "ResultEvent",
     "RetryEvent",
     "RiskLevel",
