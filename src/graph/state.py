@@ -40,7 +40,7 @@ class GraphState(TypedDict):
     reask_reason: NotRequired[str | None]  # non-None routes match_fill back to ask
 
     # -- terminal routing --
-    failure: NotRequired[dict[str, str | None] | None]  # reason (+ gate_reason) → fail node
+    failure: NotRequired[dict[str, str | None] | None]  # reason/code (+ gate_reason) → fail node
     delivered: NotRequired[bool]  # the generation loop ended in a result, not a failure
 
 

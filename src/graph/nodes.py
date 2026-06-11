@@ -35,6 +35,7 @@ from schemas import (
     CostEvent,
     DoneEvent,
     FailedEvent,
+    FailureCode,
     FsmState,
     GateReason,
     Plan,
@@ -97,8 +98,10 @@ def _generation_idem_key(session_key: str) -> str:
     return f"generation:{session_key}"
 
 
-def _failure(reason: str, *, gate_reason: str | None = None) -> dict[str, Any]:
-    return {"failure": {"reason": reason, "gate_reason": gate_reason}}
+def _failure(
+    reason: str, *, gate_reason: str | None = None, code: FailureCode = FailureCode.INTERNAL
+) -> dict[str, Any]:
+    return {"failure": {"reason": reason, "gate_reason": gate_reason, "code": code.value}}
 
 
 def _question_for(name: str, slot: Slot, *, reask_reason: str | None) -> str:
@@ -173,6 +176,7 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
             return _failure(
                 "input photo cannot anchor the identity",
                 gate_reason=state.get("gate_reason"),
+                code=FailureCode.INPUT_REJECTED,
             )
         return {}
 
@@ -181,7 +185,8 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         preset = svc.library.resolve(use_case=state["use_case"], gender=state["gender"])
         if preset is None:
             return _failure(
-                f"no preset admits use_case={state['use_case']!r} and the library ships no fallback"
+                f"no preset admits use_case={state['use_case']!r} and no fallback ships",
+                code=FailureCode.NO_PRESET,
             )
         asked = next(((n, s) for n, s in preset.slots.items() if s.ask), None)
         if asked is None:
@@ -223,7 +228,10 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
             build_prompt(preset, fill.slots, addendum=fill.addendum)
         except FreeFormRejectedError:
             if state.get("reasks", 0) >= MAX_REASKS:
-                return _failure("scene description repeatedly rejected as a prompt injection")
+                return _failure(
+                    "scene description repeatedly rejected as a prompt injection",
+                    code=FailureCode.SCENE_REJECTED,
+                )
             return {
                 "reasks": state.get("reasks", 0) + 1,
                 "reask_reason": "The previous answer was rejected — describe only the scene,"
@@ -292,7 +300,7 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         )
         approved, composition_id = _parse_decision(decision)
         if not approved:
-            return _failure("plan rejected by the user")
+            return _failure("plan rejected by the user", code=FailureCode.PLAN_REJECTED)
 
         slots = dict(state.get("slots", {}))
         if composition_id is not None:
@@ -331,17 +339,26 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
 
     async def fail(state: GraphState) -> dict[str, Any]:
         """Terminal for every pre-loop failure (the loop fails its own runs)."""
-        failure = state.get("failure") or {"reason": "unknown failure", "gate_reason": None}
+        failure = state.get("failure") or {}
         session = await svc.store.get_session(state["session_key"])
         if session is not None:
             session.fsm_state = FsmState.FAILED
             await _checkpoint(session)
+        # A pre-loop failure spent nothing in the common case, but a session may
+        # already carry charged iterations on resume — account from the record.
+        generations_spent = sum(1 for it in session.iterations if it.charged) if session else 0
+        iterations_used = len(session.iterations) if session else 0
         raw_reason = failure.get("gate_reason")
+        raw_code = failure.get("code")
         await svc.bus.publish(
             state["session_key"],
             FailedEvent(
+                code=FailureCode(raw_code) if raw_code else FailureCode.INTERNAL,
                 reason=failure.get("reason") or "unknown failure",
                 gate_reason=GateReason(raw_reason) if raw_reason else None,
+                iterations_used=iterations_used,
+                generations_spent=generations_spent,
+                actual_cost=svc.unit_price * generations_spent,
             ),
         )
         return {}

@@ -198,6 +198,22 @@ async def test_start_replay_vs_duplicate(server: tuple[str, Container]) -> None:
         assert stages.count("face_check") == 1
 
 
+async def test_start_on_below_floor_face_is_422(server: tuple[str, Container]) -> None:
+    url, _ = server
+    async with asyncio.timeout(TIMEOUT), httpx.AsyncClient(base_url=url, timeout=TIMEOUT) as c:
+        # Ingest a photo the gate rejects as below-floor (low resolution).
+        low = await _ingest(c, "f-low", image_b64=SMALL_PHOTO_B64, idem_key="ingest-low")
+        assert low.json()["gate_verdict"] == "below_floor"
+
+        # Starting on it is rejected up front (fail-fast), not spawned to fail
+        # later in the gate node — symmetric to ingest's `accepted: false`.
+        resp = await c.post(
+            "/v1/sessions/slow",
+            json=START_BODY | {"face_key": "f-low", "idem_key": "start-low"},
+        )
+        assert resp.status_code == 422, resp.text
+
+
 async def test_unknown_aggregates_are_404(server: tuple[str, Container]) -> None:
     url, _ = server
     async with asyncio.timeout(TIMEOUT), httpx.AsyncClient(base_url=url, timeout=TIMEOUT) as c:

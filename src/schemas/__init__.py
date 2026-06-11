@@ -19,7 +19,7 @@ from schemas.contract import (
     StartSessionRequest,
     StartSessionResponse,
 )
-from schemas.enums import FsmState, GateReason, Gender, RiskLevel, Verdict
+from schemas.enums import FailureCode, FsmState, GateReason, Gender, RiskLevel, Verdict
 from schemas.events import (
     CostEvent,
     DoneEvent,
@@ -70,6 +70,7 @@ __all__ = [
     "EventAdapter",
     "FaceProfile",
     "FailedEvent",
+    "FailureCode",
     "FrameMetrics",
     "FsmState",
     "GateReason",

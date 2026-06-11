@@ -33,12 +33,19 @@ class Telemetry:
     def __init__(self, *, unit_price: Decimal) -> None:
         self._unit_price = unit_price
 
-    def session_terminal(self, session: SessionState, *, failure_reason: str | None = None) -> None:
+    def session_terminal(
+        self,
+        session: SessionState,
+        *,
+        failure_reason: str | None = None,
+        failure_code: str | None = None,
+    ) -> None:
         """Record a session that reached a terminal state.
 
-        ``failure_reason`` comes from the caller (graph failure payload,
-        wall-clock timeout, cancel) — the session record itself does not
-        store one.
+        ``failure_reason``/``failure_code`` come from the caller (graph failure
+        payload, wall-clock timeout, cancel) — the session record itself does
+        not store them. ``failure_code`` is the machine-readable axis for
+        aggregation; ``failure_reason`` is free-text detail.
         """
         charged = sum(1 for it in session.iterations if it.charged)
         best = session.best_result
@@ -58,4 +65,5 @@ class Telemetry:
             verdict=best.verdict.value if best else None,
             risk_level=best.risk_level.value if best else None,
             failure_reason=failure_reason,
+            failure_code=failure_code,
         )

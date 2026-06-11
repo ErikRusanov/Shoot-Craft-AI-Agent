@@ -9,6 +9,7 @@ No domain logic is exercised here; there is none yet.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from schemas import (
     EventAdapter,
     FaceProfile,
     FailedEvent,
+    FailureCode,
     FrameMetrics,
     FsmState,
     GateReason,
@@ -211,8 +213,16 @@ _EVENT_CASES: list[Event] = [
         result_ref="s3://res/1.png",
     ),
     RetryEvent(n=2, reason="below target", previous_verdict=Verdict.SOFT),
-    ResultEvent(best=_best()),
-    FailedEvent(reason="no face", gate_reason=GateReason.NO_FACE),
+    ResultEvent(
+        best=_best(),
+        iterations_used=2,
+        generations_spent=2,
+        actual_cost=Decimal("2"),
+        preset_id="demo",
+        preset_version="1.0.0",
+        library_version="0.3.0",
+    ),
+    FailedEvent(code=FailureCode.INPUT_REJECTED, reason="no face", gate_reason=GateReason.NO_FACE),
     DoneEvent(detail="delivered"),
 ]
 

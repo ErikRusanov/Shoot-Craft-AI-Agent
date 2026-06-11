@@ -46,8 +46,10 @@ class Settings(BaseSettings):
     # never failed-over at runtime: losing Redis mid-flight is an error, not a
     # silent downgrade to state that dies with the process.
     redis_url: str | None = None  # e.g. redis://localhost:6379/0
-    # Biometrics are transient — face profiles expire fast; sessions live longer.
-    face_ttl_seconds: int = 60 * 60  # 1h
+    # The face profile outlives the session by design: a session can hang on
+    # need_input/approve for a while, and a style change reuses the same profile
+    # without a second heavy ingest. Both stay transient and TTL-bound.
+    face_ttl_seconds: int = 48 * 60 * 60  # 48h — outlives the 24h session
     session_ttl_seconds: int = 24 * 60 * 60  # 24h
     event_stream_maxlen: int = 1000  # cap per-session events:{session_key} stream
 

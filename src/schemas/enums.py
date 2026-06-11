@@ -96,3 +96,25 @@ class GateReason(StrEnum):
     OCCLUDED = "occluded"
     POOR_LIGHTING = "poor_lighting"
     EXTREME_POSE = "extreme_pose"
+
+
+class FailureCode(StrEnum):
+    """Why a session reached the ``failed`` terminal — the machine-readable axis.
+
+    The business service maps a terminal to a user action (re-shoot, re-ask,
+    retry, contact support) on ``code``; the ``FailedEvent.reason`` string is
+    human-readable detail only, free to change without breaking that mapping.
+    ``gate_reason`` further qualifies ``INPUT_REJECTED`` with the photo signal.
+    """
+
+    INPUT_REJECTED = "input_rejected"  # the input photo cannot anchor the identity
+    NO_PRESET = "no_preset"  # no preset admits the request and no fallback ships
+    SCENE_REJECTED = "scene_rejected"  # free-form scene read as injection, re-asks spent
+    PLAN_REJECTED = "plan_rejected"  # the user declined the plan at approval
+    BUDGET_EXHAUSTED = "budget_exhausted"  # budget spent before reaching the floor
+    NO_DELIVERABLE = "no_deliverable"  # retries spent, no attempt reached the floor
+    GENERATION_FAILED = "generation_failed"  # provider/face-check produced no measured frame
+    REFERENCE_MISSING = "reference_missing"  # the reference photo is gone from storage
+    WALL_CLOCK = "wall_clock"  # the run exceeded the wall-clock limit
+    CANCELLED = "cancelled"  # the caller stopped the session
+    INTERNAL = "internal"  # an unclassified internal error

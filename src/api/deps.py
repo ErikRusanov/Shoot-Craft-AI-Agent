@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
@@ -49,7 +50,7 @@ from protocols import (
     SlotFiller,
     StateStore,
 )
-from schemas import FailedEvent, FsmState, NeedInputEvent
+from schemas import FailedEvent, FailureCode, FsmState, NeedInputEvent, SessionState
 from services.budget import BudgetService
 from services.connectors import (
     FakeFaceEngine,
@@ -86,6 +87,19 @@ _WALL_CLOCK_REASON = "session run exceeded the wall-clock limit"
 _CANCELLED_REASON = "cancelled by the caller"
 
 
+def _accounting(session: SessionState | None, unit_price: Decimal) -> dict[str, Any]:
+    """Spend accounting for a terminal event, from the session record (or zeros
+    when there is no session to read)."""
+    if session is None:
+        return {"iterations_used": 0, "generations_spent": 0, "actual_cost": Decimal("0")}
+    generations_spent = sum(1 for it in session.iterations if it.charged)
+    return {
+        "iterations_used": len(session.iterations),
+        "generations_spent": generations_spent,
+        "actual_cost": unit_price * generations_spent,
+    }
+
+
 class SessionRunner:
     """Drives graph runs in background tasks, one per session.
 
@@ -117,6 +131,7 @@ class SessionRunner:
         *,
         wall_clock_seconds: int,
         session_ttl_seconds: int,
+        unit_price: Decimal,
     ) -> None:
         self._graph = graph
         self._bus = bus
@@ -124,6 +139,7 @@ class SessionRunner:
         self._telemetry = telemetry
         self._wall_clock = wall_clock_seconds
         self._session_ttl = session_ttl_seconds
+        self._unit_price = unit_price
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def start(
@@ -158,8 +174,17 @@ class SessionRunner:
         if session is not None:
             session.fsm_state = FsmState.CANCELLED
             await self._store.put_session(session, ttl_seconds=self._session_ttl)
-            self._telemetry.session_terminal(session, failure_reason=_CANCELLED_REASON)
-        await self._bus.publish(session_key, FailedEvent(reason=_CANCELLED_REASON))
+            self._telemetry.session_terminal(
+                session, failure_reason=_CANCELLED_REASON, failure_code=FailureCode.CANCELLED.value
+            )
+        await self._bus.publish(
+            session_key,
+            FailedEvent(
+                code=FailureCode.CANCELLED,
+                reason=_CANCELLED_REASON,
+                **_accounting(session, self._unit_price),
+            ),
+        )
 
     @staticmethod
     def _lock_key(session_key: str) -> str:
@@ -204,7 +229,9 @@ class SessionRunner:
         except Exception:
             await self._release(session_key, token)
             log.exception("graph_run_failed", session_key=session_key)
-            await self._bus.publish(session_key, FailedEvent(reason="internal error"))
+            await self._bus.publish(
+                session_key, FailedEvent(code=FailureCode.INTERNAL, reason="internal error")
+            )
             return
         # Release before narrating: a client reacting to `need_input` must find
         # the lock already free, or its immediate answer would bounce.
@@ -222,13 +249,20 @@ class SessionRunner:
         except Exception:  # a dying store must not mask the run's own outcome
             log.warning("run_lock_release_failed", session_key=session_key)
 
-    async def _fail_session(self, session_key: str, reason: str) -> None:
+    async def _fail_session(
+        self, session_key: str, reason: str, code: FailureCode = FailureCode.WALL_CLOCK
+    ) -> None:
         session = await self._store.get_session(session_key)
         if session is not None:
             session.fsm_state = FsmState.FAILED
             await self._store.put_session(session, ttl_seconds=self._session_ttl)
-            self._telemetry.session_terminal(session, failure_reason=reason)
-        await self._bus.publish(session_key, FailedEvent(reason=reason))
+            self._telemetry.session_terminal(
+                session, failure_reason=reason, failure_code=code.value
+            )
+        await self._bus.publish(
+            session_key,
+            FailedEvent(code=code, reason=reason, **_accounting(session, self._unit_price)),
+        )
 
     async def _emit_telemetry(self, session_key: str, *, failure_reason: str | None) -> None:
         session = await self._store.get_session(session_key)
@@ -380,6 +414,7 @@ def build_container(settings: Settings) -> Container:
             session_ttl_seconds=settings.session_ttl_seconds,
             face_ttl_seconds=settings.face_ttl_seconds,
             max_iterations=settings.max_iterations,
+            unit_price=settings.generation_unit_price,
         ),
         unit_price=settings.generation_unit_price,
         default_expected_generations=settings.default_expected_generations,
@@ -408,5 +443,6 @@ def build_container(settings: Settings) -> Container:
         Telemetry(unit_price=settings.generation_unit_price),
         wall_clock_seconds=settings.session_wall_clock_seconds,
         session_ttl_seconds=settings.session_ttl_seconds,
+        unit_price=settings.generation_unit_price,
     )
     return container

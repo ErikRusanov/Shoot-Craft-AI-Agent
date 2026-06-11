@@ -13,12 +13,13 @@ and ``result`` + ``done`` (or ``failed``) at the end.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Annotated, Literal
 
 from pydantic import Field, TypeAdapter
 
 from schemas.base import SchemaModel
-from schemas.enums import FsmState, GateReason, RiskLevel, Verdict
+from schemas.enums import FailureCode, FsmState, GateReason, RiskLevel, Verdict
 from schemas.state import BestResult, CostEstimate, Plan
 
 
@@ -62,15 +63,29 @@ class IterationStartEvent(SchemaModel):
 
 
 class IterationResultEvent(SchemaModel):
-    """Measured outcome of attempt ``n``."""
+    """Outcome of attempt ``n``.
 
+    Published for *every* attempt, including failed ones, so the stream alone
+    counts the real attempts and spend. A measured frame carries
+    ``similarity``/``verdict``/``risk_level``; an attempt that produced no
+    measured frame (provider error, or a face-check that crashed on a paid
+    frame) carries ``error`` instead and leaves those ``None``. ``charged``
+    distinguishes a paid-but-unmeasured frame from a transport-failed one.
+    The preset triple pins which thresholds/version produced the score.
+    """
+
+    schema_v: int = 2
     type: Literal["iteration_result"] = "iteration_result"
     n: int
-    similarity: float
-    verdict: Verdict
-    risk_level: RiskLevel
     charged: bool
+    similarity: float | None = None
+    verdict: Verdict | None = None
+    risk_level: RiskLevel | None = None
     result_ref: str | None = None
+    error: str | None = None  # set when the attempt produced no measured frame
+    preset_id: str | None = None
+    preset_version: str | None = None
+    library_version: str | None = None
 
 
 class RetryEvent(SchemaModel):
@@ -83,18 +98,44 @@ class RetryEvent(SchemaModel):
 
 
 class ResultEvent(SchemaModel):
-    """The delivered keep-best image."""
+    """The delivered keep-best image.
 
+    Self-sufficient: it carries what the run cost (``iterations_used``,
+    ``generations_spent``, ``actual_cost``) and the preset triple that
+    produced it, so the business service needs no second snapshot read and
+    the result stays reproducible after a library update. The image bytes
+    themselves live in object storage under ``best.result_ref``.
+    """
+
+    schema_v: int = 2
     type: Literal["result"] = "result"
     best: BestResult
+    iterations_used: int
+    generations_spent: int
+    actual_cost: Decimal
+    preset_id: str | None = None
+    preset_version: str | None = None
+    library_version: str | None = None
 
 
 class FailedEvent(SchemaModel):
-    """Terminal failure. ``gate_reason`` set when the input photo was the cause."""
+    """Terminal failure.
 
+    ``code`` is the machine-readable cause the business service maps to a user
+    action; ``reason`` is free-text detail. ``gate_reason`` qualifies an
+    ``INPUT_REJECTED`` with the photo signal. The accounting fields mirror
+    ``ResultEvent`` so a terminal is self-sufficient even when budget was spent
+    before the failure (e.g. a wall-clock timeout mid-generation).
+    """
+
+    schema_v: int = 2
     type: Literal["failed"] = "failed"
+    code: FailureCode
     reason: str
     gate_reason: GateReason | None = None
+    iterations_used: int = 0
+    generations_spent: int = 0
+    actual_cost: Decimal = Decimal("0")
 
 
 class DoneEvent(SchemaModel):

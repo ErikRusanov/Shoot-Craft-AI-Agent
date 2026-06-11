@@ -34,6 +34,8 @@ narration belongs to the graph, not here.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import structlog
 
 from protocols import EventBus, ImageGenerator, ObjectStorage, StateStore
@@ -42,6 +44,7 @@ from schemas import (
     EventAdapter,
     FaceProfile,
     FailedEvent,
+    FailureCode,
     FsmState,
     Iteration,
     IterationResultEvent,
@@ -73,6 +76,7 @@ _TEMPERATURE_DECAY = 0.5
 
 _BUDGET_EXHAUSTED = "budget exhausted before reaching the identity target"
 _NO_DELIVERABLE = "no attempt reached the identity floor"
+_REFERENCE_MISSING = "the reference photo is missing from storage"
 
 
 def _result_ref(session_key: str, n: int) -> str:
@@ -95,6 +99,7 @@ class GenerationLoop:
         session_ttl_seconds: int,
         face_ttl_seconds: int,
         max_iterations: int,
+        unit_price: Decimal,
     ) -> None:
         self._store = store
         self._storage = storage
@@ -106,6 +111,7 @@ class GenerationLoop:
         self._session_ttl = session_ttl_seconds
         self._face_ttl = face_ttl_seconds
         self._max_iterations = max_iterations
+        self._unit_price = unit_price
 
     async def run(
         self,
@@ -152,7 +158,24 @@ class GenerationLoop:
         emphasized = build_prompt(
             preset, session.slots, addendum=f"{addendum.strip()}\n\n{IDENTITY_EMPHASIS}".strip()
         )
-        reference = await self._storage.get(face.photo_ref)
+        # Pins which preset/thresholds/version produced each event's score —
+        # the stream stays reproducible without a separate state read.
+        preset_meta = {
+            "preset_id": session.preset_id,
+            "preset_version": session.preset_version,
+            "library_version": session.library_version,
+        }
+        try:
+            reference = await self._storage.get(face.photo_ref)
+        except KeyError:
+            # The anchor photo expired or was deleted: a clean typed terminal,
+            # not a crash into a generic internal error.
+            logger.warning(
+                "generation_loop.reference_missing",
+                session_key=session_key,
+                photo_ref=face.photo_ref,
+            )
+            return await self._finish(session, _REFERENCE_MISSING, FailureCode.REFERENCE_MISSING)
 
         session.fsm_state = FsmState.GENERATING
         await self._checkpoint(session)
@@ -160,6 +183,7 @@ class GenerationLoop:
         # K retries after the first attempt, under the config runaway ceiling.
         max_attempts = min(1 + thresholds.K_max_retries, self._max_iterations)
         failure_reason = _NO_DELIVERABLE
+        failure_code = FailureCode.NO_DELIVERABLE
         reserved = False
 
         for attempt in range(1, max_attempts + 1):
@@ -183,6 +207,7 @@ class GenerationLoop:
                 )
                 if not reserved:
                     failure_reason = _BUDGET_EXHAUSTED
+                    failure_code = FailureCode.BUDGET_EXHAUSTED
                     logger.info("generation_loop.budget_exhausted", session_key=session_key, n=n)
                     break
 
@@ -200,12 +225,21 @@ class GenerationLoop:
                 # reservation for the next one. The connector already retried
                 # transient failures; reaching here means the attempt is dead.
                 failure_reason = f"generation failed: {exc}"
+                failure_code = FailureCode.GENERATION_FAILED
                 session.iterations.append(
-                    Iteration(n=n, prompt_hash=built.prompt_hash, charged=False)
+                    Iteration(
+                        n=n, prompt_hash=built.prompt_hash, charged=False, error=failure_reason
+                    )
                 )
                 await self._checkpoint(session)
                 logger.warning(
                     "generation_loop.generate_failed", session_key=session_key, n=n, error=str(exc)
+                )
+                # Publish the failed attempt too, so the stream counts real
+                # attempts and spend without a post-hoc snapshot diff.
+                await self._bus.publish(
+                    session_key,
+                    IterationResultEvent(n=n, charged=False, error=failure_reason, **preset_meta),
                 )
                 if attempt < max_attempts:
                     await self._bus.publish(session_key, RetryEvent(n=n + 1, reason=failure_reason))
@@ -225,9 +259,38 @@ class GenerationLoop:
             # key) before face-check gets a chance to crash or stall.
             await self._checkpoint(session)
 
-            check = await self._facecheck.check(
-                reference_embedding=face.embedding, image=image, thresholds=thresholds
-            )
+            try:
+                check = await self._facecheck.check(
+                    reference_embedding=face.embedding, image=image, thresholds=thresholds
+                )
+            except Exception as exc:
+                # The frame is paid for and already checkpointed (provider id +
+                # storage key), but unmeasured: record why, surface it on the
+                # stream, and treat the attempt as failed rather than letting it
+                # crash the whole session into a generic internal error.
+                failure_reason = f"face-check failed: {exc}"
+                failure_code = FailureCode.GENERATION_FAILED
+                iteration.error = failure_reason
+                await self._checkpoint(session)
+                logger.warning(
+                    "generation_loop.facecheck_failed",
+                    session_key=session_key,
+                    n=n,
+                    error=str(exc),
+                )
+                await self._bus.publish(
+                    session_key,
+                    IterationResultEvent(
+                        n=n,
+                        charged=True,
+                        result_ref=result_ref,
+                        error=failure_reason,
+                        **preset_meta,
+                    ),
+                )
+                if attempt < max_attempts:
+                    await self._bus.publish(session_key, RetryEvent(n=n + 1, reason=failure_reason))
+                continue
             iteration.similarity = check.similarity
             iteration.verdict = check.verdict
             iteration.risk_level = check.risk_level
@@ -245,6 +308,7 @@ class GenerationLoop:
                     risk_level=check.risk_level,
                     charged=True,
                     result_ref=result_ref,
+                    **preset_meta,
                 ),
             )
             logger.info(
@@ -258,6 +322,7 @@ class GenerationLoop:
             if check.verdict is Verdict.PASSED:
                 break
             failure_reason = _NO_DELIVERABLE
+            failure_code = FailureCode.NO_DELIVERABLE
             if attempt < max_attempts:
                 await self._bus.publish(
                     session_key,
@@ -268,7 +333,7 @@ class GenerationLoop:
                     ),
                 )
 
-        return await self._finish(session, failure_reason)
+        return await self._finish(session, failure_reason, failure_code)
 
     async def _load(self, session_key: str) -> tuple[SessionState, FaceProfile]:
         session = await self._store.get_session(session_key)
@@ -282,19 +347,43 @@ class GenerationLoop:
         return session, face
 
     async def _finish(
-        self, session: SessionState, failure_reason: str
+        self, session: SessionState, failure_reason: str, failure_code: FailureCode
     ) -> ResultEvent | FailedEvent:
-        """Deliver keep-best if anything above the floor exists, else fail cleanly."""
+        """Deliver keep-best if anything above the floor exists, else fail cleanly.
+
+        Either terminal carries the run's accounting so the business service
+        needs no second snapshot read: ``generations_spent`` is the charged
+        frames (delivered frames, not provider calls), ``iterations_used`` is
+        every attempt, ``actual_cost`` is the spend.
+        """
+        iterations_used = len(session.iterations)
+        generations_spent = sum(1 for it in session.iterations if it.charged)
+        actual_cost = self._unit_price * generations_spent
+
         if session.best_result is not None:
             session.fsm_state = FsmState.DONE
             await self._checkpoint(session)
-            result = ResultEvent(best=session.best_result)
+            result = ResultEvent(
+                best=session.best_result,
+                iterations_used=iterations_used,
+                generations_spent=generations_spent,
+                actual_cost=actual_cost,
+                preset_id=session.preset_id,
+                preset_version=session.preset_version,
+                library_version=session.library_version,
+            )
             await self._bus.publish(session.session_key, result)
             return result
 
         session.fsm_state = FsmState.FAILED
         await self._checkpoint(session)
-        failed = FailedEvent(reason=failure_reason)
+        failed = FailedEvent(
+            code=failure_code,
+            reason=failure_reason,
+            iterations_used=iterations_used,
+            generations_spent=generations_spent,
+            actual_cost=actual_cost,
+        )
         await self._bus.publish(session.session_key, failed)
         return failed
 

@@ -108,6 +108,9 @@ class Iteration(SchemaModel):
     verdict: Verdict | None = None
     charged: bool = False
     risk_level: RiskLevel | None = None
+    # Why a charged frame stayed unmeasured (face-check crash) or an attempt
+    # produced nothing (provider error) — so the history explains the gap.
+    error: str | None = None
 
 
 class CompositionChoice(StrictModel):

@@ -16,6 +16,7 @@ fake, and state/budget/idempotency sit on the in-memory store. What is pinned:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 
 import numpy as np
 import pytest
@@ -27,6 +28,7 @@ from schemas import (
     Event,
     FaceProfile,
     FailedEvent,
+    FailureCode,
     FrameMetrics,
     FsmState,
     GateReason,
@@ -54,6 +56,8 @@ from tests.fakes import (
 )
 
 TTL = 3600
+UNIT_PRICE = Decimal("1")
+LIBRARY_VERSION = "0.3.0"
 SESSION_KEY = "sess-1"
 FACE_KEY = "face-1"
 PHOTO_REF = "photos/face-1"
@@ -180,6 +184,9 @@ async def make_harness(
             slots={"style": "studio"},
             thresholds=preset.thresholds,
             budget_limit=budget_limit,
+            preset_id=preset.id,
+            preset_version=preset.version,
+            library_version=LIBRARY_VERSION,
         ),
         ttl_seconds=TTL,
     )
@@ -196,6 +203,7 @@ async def make_harness(
         session_ttl_seconds=TTL,
         face_ttl_seconds=TTL,
         max_iterations=max_iterations,
+        unit_price=UNIT_PRICE,
     )
     return Harness(loop=loop, store=store, storage=storage, bus=bus, generator=gen, preset=preset)
 
@@ -213,6 +221,15 @@ async def test_first_attempt_passes_and_delivers() -> None:
     assert result.best.verdict is Verdict.PASSED
     assert result.best.risk_level is RiskLevel.LOW
     assert await h.storage.get(result.best.result_ref) == h.generator.image
+
+    # The terminal is self-sufficient: spend and the preset triple travel with
+    # it, no second snapshot read needed.
+    assert result.iterations_used == 1
+    assert result.generations_spent == 1
+    assert result.actual_cost == UNIT_PRICE
+    assert result.preset_id == h.preset.id
+    assert result.preset_version == h.preset.version
+    assert result.library_version == LIBRARY_VERSION
 
     assert len(h.generator.calls) == 1
     assert h.generator.calls[0].reference_count == 1
@@ -358,6 +375,17 @@ async def test_network_failure_does_not_eat_budget() -> None:
     assert [it.charged for it in session.iterations] == [False, True]
     assert session.iterations[0].provider_request_id is None
     assert session.iterations[0].result_ref is None
+    assert session.iterations[0].error is not None  # the dead attempt is explained
+    # The failed attempt is on the stream too — the event count matches the
+    # recorded attempts, so spend-per-retry is readable from the stream alone.
+    assert h.bus.types == [
+        "iteration_start",
+        "iteration_result",
+        "retry",
+        "iteration_start",
+        "iteration_result",
+        "result",
+    ]
     await h.assert_budget_consumed(1)
 
 
@@ -445,6 +473,24 @@ async def test_distinct_idem_keys_run_independently() -> None:
     assert len(h.generator.calls) == 2
 
 
+# --- missing reference ---
+
+
+async def test_missing_reference_photo_fails_cleanly() -> None:
+    # The anchor photo expired between session start and the paid loop: the loop
+    # must fail with a typed terminal, never crash into a generic internal error.
+    h = await make_harness(similarities=[0.9])
+    h.storage._data.pop(PHOTO_REF)
+
+    result = await h.run()
+
+    assert isinstance(result, FailedEvent)
+    assert result.code is FailureCode.REFERENCE_MISSING
+    assert h.generator.calls == []  # nothing paid for
+    assert (await h.session()).fsm_state is FsmState.FAILED
+    await h.assert_budget_consumed(0)
+
+
 # --- write-ahead ---
 
 
@@ -453,16 +499,27 @@ async def test_paid_frame_is_checkpointed_before_facecheck() -> None:
         async def embed(self, image: bytes) -> NDArray[np.float32]:
             raise RuntimeError("face-check infrastructure died")
 
+    # A face-check crash on a paid frame does not blow up the session: the frame
+    # is already traceable, the attempt is recorded with its error, and the loop
+    # fails cleanly instead of crashing into a generic internal error.
     h = await make_harness(embedder=ExplodingEmbedder())
-    with pytest.raises(RuntimeError, match="face-check infrastructure died"):
-        await h.run()
+    outcome = await h.run()
 
+    assert isinstance(outcome, FailedEvent)
+    assert outcome.code is FailureCode.GENERATION_FAILED
+
+    session = await h.session()
+    first = session.iterations[0]
     # The crash hit *after* the paid frame became traceable: the checkpoint
     # already carries the provider request id and the stored result ref.
-    session = await h.session()
-    (iteration,) = session.iterations
-    assert iteration.charged is True
-    assert iteration.provider_request_id is not None
-    assert iteration.result_ref == f"sessions/{SESSION_KEY}/iterations/1"
-    assert await h.storage.get(iteration.result_ref) == h.generator.image
-    assert iteration.similarity is None  # face-check never finished
+    assert first.charged is True
+    assert first.provider_request_id is not None
+    assert first.result_ref == f"sessions/{SESSION_KEY}/iterations/1"
+    assert await h.storage.get(first.result_ref) == h.generator.image
+    assert first.similarity is None  # face-check never finished
+    assert first.error is not None  # ...but the gap is explained
+
+    # Every charged-but-unmeasured attempt still surfaces on the stream, so the
+    # event count matches the recorded attempts (no silent under-count).
+    assert h.bus.types.count("iteration_result") == len(session.iterations)
+    assert all(it.charged and it.error is not None for it in session.iterations)

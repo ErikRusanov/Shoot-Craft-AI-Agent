@@ -154,7 +154,8 @@ async def start_session(
     async def op() -> StartSessionResponse:
         if await container.store.get_session(session_key) is not None:
             raise HTTPException(status_code=409, detail=f"session {session_key!r} already exists")
-        if await container.store.get_face(body.face_key) is None:
+        face = await container.store.get_face(body.face_key)
+        if face is None:
             # No profile yet — fine if the raw photo is in storage (the graph
             # ingests lazily); nothing at all is a caller error worth a 404.
             try:
@@ -163,6 +164,14 @@ async def start_session(
                 raise HTTPException(
                     status_code=404, detail=f"unknown face_key {body.face_key!r}; ingest first"
                 ) from exc
+        elif face.gate_verdict is Verdict.BELOW_FLOOR or not face.embedding:
+            # The profile exists but the photo cannot anchor an identity: reject
+            # up front (symmetric to ingest's `accepted`), don't spawn a run that
+            # would only fail in the gate node.
+            raise HTTPException(
+                status_code=422,
+                detail=f"face_key {body.face_key!r} did not pass the quality gate; re-ingest",
+            )
         preset = container.library.resolve(use_case=body.use_case, gender=body.gender)
         started = await container.runner.start(
             session_key,
