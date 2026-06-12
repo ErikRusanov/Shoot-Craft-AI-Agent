@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -26,6 +27,8 @@ from numpy.typing import NDArray
 from protocols import Embedder
 from schemas import (
     AppliesTo,
+    BriefAnalysis,
+    EditStep,
     Event,
     FaceProfile,
     FailedEvent,
@@ -34,6 +37,7 @@ from schemas import (
     FsmState,
     GateReason,
     Generation,
+    Plan,
     Preset,
     ResultEvent,
     RiskLevel,
@@ -44,9 +48,10 @@ from schemas import (
 )
 from services.budget import BudgetService
 from services.facecheck import FaceCheckService
-from services.generation_loop import IDENTITY_EMPHASIS, GenerationLoop
+from services.generation_loop import GenerationLoop
 from services.idempotency import IdempotencyService
 from services.pricing import PricingTable
+from services.prompt_writer import IDENTITY_EMPHASIS, DeterministicPromptWriter
 from tests.fakes import (
     FixedImageGenerator,
     FlakyImageGenerator,
@@ -187,6 +192,7 @@ async def make_harness(
         storage=storage,
         bus=bus,
         generator=gen,
+        writer=DeterministicPromptWriter(),
         facecheck=FaceCheckService(emb),
         budget=BudgetService(store, PRICING),
         pricing=PRICING,
@@ -437,6 +443,86 @@ async def test_retry_strengthens_reference_without_rewriting_the_prompt() -> Non
         assert "Avatar of the person in studio style." in call.prompt
         assert call.prompt.endswith("Strictly avoid: " + h.preset.negative_prompt)
         assert call.params.aspect_ratio == h.preset.generation.aspect_ratio
+
+
+# --- multi-step chain ---
+
+
+async def _set_plan(
+    h: Harness,
+    steps: list[EditStep],
+    *,
+    mode: Literal["edit", "generate"] = "edit",
+    preserve: list[str] | None = None,
+) -> None:
+    session = await h.session()
+    session.brief_analysis = BriefAnalysis(mode=mode, preserve=preserve or [])
+    session.plan = Plan(summary="", planned_generations=len(steps), steps=steps)
+    await h.store.put_session(session, ttl_seconds=TTL)
+
+
+async def test_two_step_chain_delivers_last_step_and_chains_images() -> None:
+    h = await make_harness(similarities=[0.9, 0.88])
+    await _set_plan(
+        h,
+        [
+            EditStep(
+                n=1, title="background", instruction="blue background", targets=["background"]
+            ),
+            EditStep(n=2, title="clothing", instruction="red shirt", targets=["clothing"]),
+        ],
+    )
+    result = await h.run(face_crop=b"anchor-crop")
+
+    assert isinstance(result, ResultEvent)
+    assert result.best.iteration_n == 2  # the last completed step's best is delivered
+    assert len(h.generator.calls) == 2
+    # Step 1 edits the original photo; step 2 edits step 1's result (the chain).
+    assert h.generator.calls[0].reference_image == REFERENCE_PHOTO
+    assert h.generator.calls[1].reference_image == h.generator.image
+    # The identity anchor crop is the original on every step.
+    assert all(call.face_crop == b"anchor-crop" for call in h.generator.calls)
+
+    session = await h.session()
+    assert [it.step_n for it in session.iterations] == [1, 2]
+    assert session.plan is not None
+    assert [s.status for s in session.plan.steps] == ["completed", "completed"]
+    assert all(s.result_ref is not None for s in session.plan.steps)
+
+
+async def test_partial_chain_delivers_completed_steps() -> None:
+    # Step 1 passes; step 2 never reaches the floor → ship step 1's best, a valid
+    # partial result, and leave step 2 uncompleted.
+    h = await make_harness(similarities=[0.9, 0.3, 0.3], k=1)
+    await _set_plan(
+        h,
+        [
+            EditStep(n=1, title="background", instruction="blue", targets=["background"]),
+            EditStep(n=2, title="clothing", instruction="red shirt", targets=["clothing"]),
+        ],
+    )
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)
+    assert result.best.iteration_n == 1
+    session = await h.session()
+    assert session.plan is not None
+    assert [s.status for s in session.plan.steps] == ["completed", "pending"]
+
+
+async def test_skipped_step_is_not_generated() -> None:
+    h = await make_harness(similarities=[0.9])
+    await _set_plan(
+        h,
+        [
+            EditStep(n=1, title="bg", instruction="blue", targets=["background"]),
+            EditStep(n=2, title="x", instruction="y", targets=["clothing"], status="skipped"),
+        ],
+    )
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)
+    assert len(h.generator.calls) == 1  # only the pending step ran
 
 
 # --- idempotency ---

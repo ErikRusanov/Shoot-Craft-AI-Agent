@@ -1,48 +1,51 @@
-"""Generation loop — drive attempts until the result looks like the person.
+"""Generation loop — drive a step plan until each result looks like the person.
 
-The deterministic core of the product: build the prompt once, then
-generate → face-check → keep-best → retry, with every knob the retry turns
-derived from the attempt number, never invented per run. The loop is the only
-place a paid generation happens, so the money rules live here too:
+The deterministic core of the product. A brief decomposes into ordered steps
+(:class:`~schemas.state.EditStep`); the loop runs them in sequence, and within
+each step runs today's retry cycle — write the body → generate → face-check →
+keep-best → retry. The money rules live here, scoped inside a step:
 
-- **Budget.** Pay-as-you-go in dollars: a conservative estimate is *reserved*
-  (atomic, via the :class:`~protocols.budget.BudgetMeter`) immediately before
-  the generator call, then *settled* to the real ``usage.cost`` once the
-  provider answers. A transport/4xx failure never charged, so the reservation is
-  *cancelled* (full refund) and the next attempt reserves afresh; a 2xx refusal
-  (no image) may have been billed, so it is settled, not refunded. Exhaustion —
-  the next reservation would exceed the limit — is a clean ``failed``, not an
-  exception.
-- **Write-ahead.** ``provider_request_id`` and ``result_ref`` are checkpointed
-  on the session *before* face-check runs: once the provider was paid, the
-  frame must be traceable even if the process dies mid-measurement.
-- **Keep-best.** The best frame at or above ``identity_floor`` survives; a
-  worse later attempt can never displace it, and a below-floor frame is never
-  delivered, period. Verdicts are bands of the same similarity score, so
-  ordering by similarity already keeps ``passed`` ahead of ``soft``.
-- **Retry ≤ K** (`thresholds.K_max_retries`, frozen from the preset), capped by
-  the config-wide runaway ceiling. A retry *strengthens the reference* — adds
-  the tight face crop, appends a fixed identity-emphasis addendum, lowers
-  temperature — it never rewrites the prompt: the identity block and structure
-  stay frozen (``build_prompt`` enforces it).
-- **Idempotency.** The whole run is execute-once by ``idem_key``: re-entry
-  replays the recorded terminal event without touching the generator or the
-  budget.
-
-The loop emits ``iteration_start`` / ``iteration_result`` / ``retry`` and ends
-the stream's generation chapter with ``result`` or ``failed``; coarser stage
-narration belongs to the graph, not here.
+- **Chaining.** The working image a step edits is the previous step's kept-best;
+  step 1 edits the original photo. The **identity anchor is always the crop of
+  the original photo**, attached on every attempt of every step, and face-check
+  is **always** against the original embedding — so face fidelity cannot drift
+  along the chain.
+- **Keep-best per step.** The best frame at/above ``identity_floor`` survives the
+  step; the delivered result is the **last completed step's** best. A partially
+  completed chain (budget ran out, or a later step found no deliverable) is a
+  valid result, not a failure — only a chain that completes *no* step fails.
+- **The writer composes the body.** ``compose`` once per step, ``revise`` per
+  retry (feedback = the prior attempt's face-check); the builder assembles the
+  frozen blocks and locks around it. The deterministic writer reproduces the old
+  filled-template + identity-emphasis behavior exactly.
+- **Budget.** Reserve a padded estimate before each generation, settle to the
+  real ``usage.cost``, refund a transport/4xx failure; exhaustion ends the chain
+  cleanly with whatever was already delivered. Writer LLM spend (when any) is
+  recorded as a ``SLOT_FILL`` line.
+- **Write-ahead & idempotency** are unchanged: the paid frame is checkpointed
+  before face-check, and the whole run is execute-once by ``idem_key``.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 
 import structlog
 
-from protocols import EventBus, GenerationRefusedError, ImageGenerator, ObjectStorage, StateStore
+from protocols import (
+    EventBus,
+    GenerationRefusedError,
+    ImageGenerator,
+    ObjectStorage,
+    PromptWriter,
+    StateStore,
+)
+from protocols.budget import BudgetMeter
+from protocols.prompt_writer import WriteRequest, WriteResult, WriterFeedback
 from schemas import (
     BestResult,
+    EditStep,
     EventAdapter,
     FaceProfile,
     FailedEvent,
@@ -52,28 +55,22 @@ from schemas import (
     IterationResultEvent,
     IterationStartEvent,
     PaidCallKind,
+    PaidCallRecord,
     Preset,
     ProviderUsage,
     ResultEvent,
     RetryEvent,
     SessionState,
+    Thresholds,
     Verdict,
 )
 from services.budget import BudgetService
 from services.facecheck import FaceCheckResult, FaceCheckService
 from services.idempotency import IdempotencyService
 from services.pricing import PricingTable
-from services.prompt_builder import BuiltPrompt, build_prompt
+from services.prompt_builder import BuiltPrompt, assemble_prompt, fill_template
 
 logger = structlog.get_logger(__name__)
-
-# The one sanctioned retry text: appended as an *addendum* after the frozen
-# structure, never edited into it. Fixed wording keeps retries reproducible.
-IDENTITY_EMPHASIS = (
-    "Critical: render the exact same person as in the reference photo — identical "
-    "facial geometry, eyes, nose, lips, jawline, skin tone and texture. "
-    "A faithful, recognizable likeness matters more than any stylistic choice."
-)
 
 # Each retry halves the temperature: identity drift is the failure being
 # corrected, and lower temperature trades variety for fidelity.
@@ -93,8 +90,19 @@ def _usage_cost(usage: ProviderUsage | None) -> Decimal | None:
     return usage.cost if usage is not None else None
 
 
+@dataclass(slots=True)
+class _StepOutcome:
+    """What one step produced — its best frame (if any) and why it stopped."""
+
+    best: BestResult | None
+    best_bytes: bytes | None
+    failure_reason: str
+    failure_code: FailureCode
+    budget_exhausted: bool
+
+
 class GenerationLoop:
-    """Runs the generate → face-check → keep-best cycle for one session."""
+    """Runs the per-step generate → face-check → keep-best cycle for one session."""
 
     def __init__(
         self,
@@ -103,6 +111,7 @@ class GenerationLoop:
         storage: ObjectStorage,
         bus: EventBus,
         generator: ImageGenerator,
+        writer: PromptWriter,
         facecheck: FaceCheckService,
         budget: BudgetService,
         pricing: PricingTable,
@@ -116,6 +125,7 @@ class GenerationLoop:
         self._storage = storage
         self._bus = bus
         self._generator = generator
+        self._writer = writer
         self._facecheck = facecheck
         self._budget = budget
         self._pricing = pricing
@@ -134,13 +144,7 @@ class GenerationLoop:
         face_crop: bytes | None = None,
         addendum: str = "",
     ) -> ResultEvent | FailedEvent:
-        """Drive the loop to a terminal event, exactly once per ``idem_key``.
-
-        ``face_crop`` is the tight crop of the anchor face (prepared by the
-        caller, which still has the detection bbox); retries attach it to
-        strengthen the reference. ``addendum`` is the session's sanctioned
-        free-text extension, passed through to every prompt build.
-        """
+        """Drive the chain to a terminal event, exactly once per ``idem_key``."""
 
         async def op() -> bytes:
             outcome = await self._drive(
@@ -165,13 +169,6 @@ class GenerationLoop:
         thresholds = session.thresholds
         if thresholds is None:
             raise ValueError(f"session {session_key!r} has no frozen thresholds")
-
-        base = build_prompt(preset, session.slots, addendum=addendum)
-        emphasized = build_prompt(
-            preset, session.slots, addendum=f"{addendum.strip()}\n\n{IDENTITY_EMPHASIS}".strip()
-        )
-        # Pins which preset/thresholds/version produced each event's score —
-        # the stream stays reproducible without a separate state read.
         preset_meta = {
             "preset_id": session.preset_id,
             "preset_version": session.preset_version,
@@ -180,8 +177,6 @@ class GenerationLoop:
         try:
             reference = await self._storage.get(face.photo_ref)
         except KeyError:
-            # The anchor photo expired or was deleted: a clean typed terminal,
-            # not a crash into a generic internal error.
             logger.warning(
                 "generation_loop.reference_missing",
                 session_key=session_key,
@@ -191,42 +186,129 @@ class GenerationLoop:
 
         session.fsm_state = FsmState.GENERATING
         await self._checkpoint(session)
-
         meter = self._budget.meter(
             session_key, limit=session.budget_limit, ttl_seconds=self._session_ttl
         )
 
-        # K retries after the first attempt, under the config runaway ceiling.
+        mode = session.brief_analysis.mode if session.brief_analysis is not None else "generate"
+        preserve = list(session.brief_analysis.preserve) if session.brief_analysis else []
+        locked = {
+            name: session.slots[name]
+            for name, slot in preset.slots.items()
+            if slot.policy == "locked" and name in session.slots
+        }
+        defaults = {name: v for name, v in session.slots.items() if name not in locked}
+
+        # The working image the next step edits — the original photo to begin with,
+        # then each completed step's best. The identity anchor crop stays original.
+        working = reference
+        failure_reason, failure_code = _NO_DELIVERABLE, FailureCode.NO_DELIVERABLE
+
+        for step in self._runnable_steps(session, preset):
+            outcome = await self._run_step(
+                session=session,
+                face=face,
+                preset=preset,
+                thresholds=thresholds,
+                meter=meter,
+                step=step,
+                mode=mode,
+                preserve=preserve,
+                locked=locked,
+                defaults=defaults,
+                addendum=addendum,
+                working_image=working,
+                face_crop=face_crop,
+                preset_meta=preset_meta,
+            )
+            failure_reason, failure_code = outcome.failure_reason, outcome.failure_code
+            if outcome.best is None:
+                # This step produced no deliverable — stop the chain and ship
+                # whatever earlier steps delivered (a partial chain is valid).
+                break
+            step.status = "completed"
+            step.result_ref = outcome.best.result_ref
+            session.best_result = outcome.best  # the latest completed step wins
+            working = outcome.best_bytes if outcome.best_bytes is not None else working
+            await self._checkpoint(session)
+            if outcome.budget_exhausted:
+                break
+
+        return await self._finish(session, failure_reason, failure_code)
+
+    def _runnable_steps(self, session: SessionState, preset: Preset) -> list[EditStep]:
+        """The pending steps to generate; a session without a plan is one step.
+
+        A ``skipped`` step (budget-trimmed by the planner) is not generated. With
+        no plan at all (the legacy single-shot path), a single synthetic step
+        carries the resolved slots — the deterministic body is then exactly today's.
+        """
+        if session.plan is not None and session.plan.steps:
+            return [s for s in session.plan.steps if s.status != "skipped"]
+        return [EditStep(n=1, title=preset.id, instruction="", targets=[])]
+
+    async def _run_step(
+        self,
+        *,
+        session: SessionState,
+        face: FaceProfile,
+        preset: Preset,
+        thresholds: Thresholds,
+        meter: BudgetMeter,
+        step: EditStep,
+        mode: str,
+        preserve: list[str],
+        locked: dict[str, str],
+        defaults: dict[str, str],
+        addendum: str,
+        working_image: bytes,
+        face_crop: bytes | None,
+        preset_meta: dict[str, str | None],
+    ) -> _StepOutcome:
+        """Run the retry cycle for one step against ``working_image``."""
+        session_key = session.session_key
+        request = self._write_request(
+            preset, mode, step, preserve, locked, defaults, addendum, session.slots
+        )
+        base = await self._writer.compose(request, photo_metrics=face.metrics, meter=meter)
+        await self._record_writer_cost(session, base)
+        base_built = assemble_prompt(preset, base.body, locks=locked)
+        prev_body = base.body
+        base_temperature = base_built.params.temperature
+
         max_attempts = min(1 + thresholds.K_max_retries, self._max_iterations)
-        failure_reason = _NO_DELIVERABLE
-        failure_code = FailureCode.NO_DELIVERABLE
+        step_best: BestResult | None = None
+        step_best_bytes: bytes | None = None
+        last: WriterFeedback = WriterFeedback(None, None)
+        failure_reason, failure_code = _NO_DELIVERABLE, FailureCode.NO_DELIVERABLE
 
         for attempt in range(1, max_attempts + 1):
             retrying = attempt > 1
             n = len(session.iterations) + 1
-            built = emphasized if retrying else base
-            params = built.params
             if retrying:
-                params = params.model_copy(
-                    update={
-                        "temperature": built.params.temperature
-                        * _TEMPERATURE_DECAY ** (attempt - 1)
-                    }
+                revised = await self._writer.revise(prev_body, last, request=request, meter=meter)
+                await self._record_writer_cost(session, revised)
+                prev_body = revised.body
+                built = assemble_prompt(preset, revised.body, locks=locked)
+                params = base_built.params.model_copy(
+                    update={"temperature": base_temperature * _TEMPERATURE_DECAY ** (attempt - 1)}
                 )
-            # The tight face crop strengthens identity; sent on every attempt
-            # (the modest extra input cost buys a real fidelity gain).
-            send_crop = face_crop
+            else:
+                built = base_built
+                params = base_built.params
 
-            # Reserve a padded estimate for *this* prompt before paying for it;
-            # refusal means the next call would exceed the dollar limit.
             reservation = await meter.reserve(
-                PaidCallKind.GENERATION, estimate=self._reserve_estimate(built, send_crop=send_crop)
+                PaidCallKind.GENERATION, estimate=self._reserve_estimate(built, send_crop=face_crop)
             )
             if reservation is None:
-                failure_reason = _BUDGET_EXHAUSTED
-                failure_code = FailureCode.BUDGET_EXHAUSTED
                 logger.info("generation_loop.budget_exhausted", session_key=session_key, n=n)
-                break
+                return _StepOutcome(
+                    step_best,
+                    step_best_bytes,
+                    _BUDGET_EXHAUSTED,
+                    FailureCode.BUDGET_EXHAUSTED,
+                    True,
+                )
 
             await self._bus.publish(session_key, IterationStartEvent(n=n))
 
@@ -234,12 +316,10 @@ class GenerationLoop:
                 generated = await self._generator.generate(
                     prompt=built.text,
                     params=params,
-                    reference_images=[reference],
-                    face_crop=send_crop,
+                    reference_images=[working_image],
+                    face_crop=face_crop,
                 )
             except GenerationRefusedError as exc:
-                # 2xx without an image: possibly billed, so settle (not refund)
-                # to the reported cost. The attempt produced nothing — retry.
                 cost = await reservation.settle(_usage_cost(exc.usage))
                 failure_reason = f"generation refused: {exc}"
                 failure_code = FailureCode.GENERATION_FAILED
@@ -247,6 +327,7 @@ class GenerationLoop:
                 session.iterations.append(
                     Iteration(
                         n=n,
+                        step_n=step.n,
                         prompt_hash=built.prompt_hash,
                         prompt_text=built.text,
                         charged=charged,
@@ -269,15 +350,13 @@ class GenerationLoop:
                     await self._bus.publish(session_key, RetryEvent(n=n + 1, reason=failure_reason))
                 continue
             except Exception as exc:
-                # Transport/4xx: the provider never charged, so refund the whole
-                # reservation. The connector already retried transient failures;
-                # reaching here means the attempt is dead.
                 await reservation.cancel()
                 failure_reason = f"generation failed: {exc}"
                 failure_code = FailureCode.GENERATION_FAILED
                 session.iterations.append(
                     Iteration(
                         n=n,
+                        step_n=step.n,
                         prompt_hash=built.prompt_hash,
                         prompt_text=built.text,
                         charged=False,
@@ -288,8 +367,6 @@ class GenerationLoop:
                 logger.warning(
                     "generation_loop.generate_failed", session_key=session_key, n=n, error=str(exc)
                 )
-                # Publish the failed attempt too, so the stream counts real
-                # attempts and spend without a post-hoc snapshot diff.
                 await self._bus.publish(
                     session_key,
                     IterationResultEvent(n=n, charged=False, error=failure_reason, **preset_meta),
@@ -298,12 +375,11 @@ class GenerationLoop:
                     await self._bus.publish(session_key, RetryEvent(n=n + 1, reason=failure_reason))
                 continue
 
-            # A delivered frame: settle to the real billed cost (or the reserved
-            # estimate when the provider reported none).
             cost = await reservation.settle(_usage_cost(generated.usage))
             result_ref = await self._storage.put(_result_ref(session_key, n), generated.image_bytes)
             iteration = Iteration(
                 n=n,
+                step_n=step.n,
                 prompt_hash=built.prompt_hash,
                 prompt_text=built.text,
                 provider_request_id=generated.provider_request_id,
@@ -313,9 +389,7 @@ class GenerationLoop:
                 usage=generated.usage,
             )
             session.iterations.append(iteration)
-            # Write-ahead: the paid frame is traceable (provider id + storage
-            # key) before face-check gets a chance to crash or stall.
-            await self._checkpoint(session)
+            await self._checkpoint(session)  # write-ahead: traceable before face-check
 
             try:
                 check = await self._facecheck.check(
@@ -324,19 +398,12 @@ class GenerationLoop:
                     thresholds=thresholds,
                 )
             except Exception as exc:
-                # The frame is paid for and already checkpointed (provider id +
-                # storage key), but unmeasured: record why, surface it on the
-                # stream, and treat the attempt as failed rather than letting it
-                # crash the whole session into a generic internal error.
                 failure_reason = f"face-check failed: {exc}"
                 failure_code = FailureCode.GENERATION_FAILED
                 iteration.error = failure_reason
                 await self._checkpoint(session)
                 logger.warning(
-                    "generation_loop.facecheck_failed",
-                    session_key=session_key,
-                    n=n,
-                    error=str(exc),
+                    "generation_loop.facecheck_failed", session_key=session_key, n=n, error=str(exc)
                 )
                 await self._bus.publish(
                     session_key,
@@ -352,11 +419,20 @@ class GenerationLoop:
                 if attempt < max_attempts:
                     await self._bus.publish(session_key, RetryEvent(n=n + 1, reason=failure_reason))
                 continue
+
             iteration.similarity = check.similarity
             iteration.verdict = check.verdict
             iteration.risk_level = check.risk_level
             self._track_convergence(face, check.similarity)
-            self._keep_best(session, iteration, check)
+            if self._keep_best_in_step(step_best, check):
+                step_best = BestResult(
+                    iteration_n=n,
+                    result_ref=result_ref,
+                    similarity=check.similarity,
+                    verdict=check.verdict,
+                    risk_level=check.risk_level,
+                )
+                step_best_bytes = generated.image_bytes
             await self._checkpoint(session)
             await self._store.put_face(face, ttl_seconds=self._face_ttl)
 
@@ -377,14 +453,15 @@ class GenerationLoop:
                 "generation_loop.iteration",
                 session_key=session_key,
                 n=n,
+                step_n=step.n,
                 similarity=round(check.similarity, 4),
                 verdict=check.verdict,
             )
 
             if check.verdict is Verdict.PASSED:
                 break
-            failure_reason = _NO_DELIVERABLE
-            failure_code = FailureCode.NO_DELIVERABLE
+            last = WriterFeedback(check.similarity, check.verdict)
+            failure_reason, failure_code = _NO_DELIVERABLE, FailureCode.NO_DELIVERABLE
             if attempt < max_attempts:
                 await self._bus.publish(
                     session_key,
@@ -395,7 +472,65 @@ class GenerationLoop:
                     ),
                 )
 
-        return await self._finish(session, failure_reason, failure_code)
+        return _StepOutcome(step_best, step_best_bytes, failure_reason, failure_code, False)
+
+    def _write_request(
+        self,
+        preset: Preset,
+        mode: str,
+        step: EditStep,
+        preserve: list[str],
+        locked: dict[str, str],
+        defaults: dict[str, str],
+        addendum: str,
+        slots: dict[str, str],
+    ) -> WriteRequest:
+        """Build the writer's request — and its deterministic fallback body."""
+        template_body = fill_template(
+            preset, self._slots_for_step(preset, step, mode, slots), addendum=addendum
+        )
+        return WriteRequest(
+            mode="edit" if mode == "edit" else "generate",
+            instruction=step.instruction,
+            preserve=preserve,
+            locked=locked,
+            defaults=defaults,
+            style_notes=preset.style_notes,
+            template_body=template_body,
+        )
+
+    @staticmethod
+    def _slots_for_step(
+        preset: Preset, step: EditStep, mode: str, slots: dict[str, str]
+    ) -> dict[str, str]:
+        """Resolved slots for this step's deterministic body.
+
+        In edit mode the step's instruction fills the preset's free-form
+        (enum-less) slot, so each step's template body carries that step's change;
+        in generate mode the resolved slots are used as-is (today's body).
+        """
+        merged = dict(slots)
+        if mode != "edit" or not step.instruction:
+            return merged
+        free = next((name for name, s in preset.slots.items() if s.enum is None), None)
+        if free is not None:
+            merged[free] = step.instruction
+        return merged
+
+    @staticmethod
+    def _keep_best_in_step(current: BestResult | None, check: FaceCheckResult) -> bool:
+        """Strictly-better-similarity wins within a step; below-floor never enters."""
+        if check.verdict is Verdict.BELOW_FLOOR:
+            return False
+        return current is None or check.similarity > current.similarity
+
+    async def _record_writer_cost(self, session: SessionState, result: WriteResult) -> None:
+        """Account writer LLM spend (when any) so cost_spent stays complete."""
+        if result.cost > Decimal("0"):
+            session.llm_calls.append(
+                PaidCallRecord(kind=PaidCallKind.SLOT_FILL, cost=result.cost, usage=result.usage)
+            )
+            await self._checkpoint(session)
 
     def _reserve_estimate(self, built: BuiltPrompt, *, send_crop: bytes | None) -> Decimal:
         """Padded USD reservation for one generation with this exact prompt."""
@@ -420,12 +555,10 @@ class GenerationLoop:
     async def _finish(
         self, session: SessionState, failure_reason: str, failure_code: FailureCode
     ) -> ResultEvent | FailedEvent:
-        """Deliver keep-best if anything above the floor exists, else fail cleanly.
+        """Deliver the last completed step's best, else fail cleanly.
 
-        Either terminal carries the run's accounting so the business service
-        needs no second snapshot read: ``generations_spent`` is the charged
-        frames (delivered frames, not provider calls), ``iterations_used`` is
-        every attempt, ``cost_spent`` is the real dollars billed.
+        Accounting travels with either terminal so the business service needs no
+        second snapshot read.
         """
         iterations_used = len(session.iterations)
         generations_spent = session.generations_spent()
@@ -457,22 +590,6 @@ class GenerationLoop:
         )
         await self._bus.publish(session.session_key, failed)
         return failed
-
-    @staticmethod
-    def _keep_best(session: SessionState, iteration: Iteration, check: FaceCheckResult) -> None:
-        """Strictly-better-similarity wins; below-floor frames never enter."""
-        if check.verdict is Verdict.BELOW_FLOOR:
-            return
-        if session.best_result is not None and check.similarity <= session.best_result.similarity:
-            return
-        assert iteration.result_ref is not None  # set by the write-ahead checkpoint
-        session.best_result = BestResult(
-            iteration_n=iteration.n,
-            result_ref=iteration.result_ref,
-            similarity=check.similarity,
-            verdict=check.verdict,
-            risk_level=check.risk_level,
-        )
 
     @staticmethod
     def _track_convergence(face: FaceProfile, similarity: float) -> None:

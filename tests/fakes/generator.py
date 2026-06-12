@@ -38,6 +38,9 @@ class GenerateCall:
     params: Generation
     reference_count: int
     face_crop: bytes | None = None
+    # The working image this call edited (reference_images[0]) — lets a chained
+    # multi-step test assert step N edited step N-1's result, not the original.
+    reference_image: bytes | None = None
 
 
 class FixedImageGenerator:
@@ -61,7 +64,15 @@ class FixedImageGenerator:
         reference_images: Sequence[bytes],
         face_crop: bytes | None = None,
     ) -> GeneratedImage:
-        self.calls.append(GenerateCall(prompt, params, len(reference_images), face_crop))
+        self.calls.append(
+            GenerateCall(
+                prompt,
+                params,
+                len(reference_images),
+                face_crop,
+                reference_images[0] if reference_images else None,
+            )
+        )
         rid = "fake-" + hashlib.sha256(prompt.encode()).hexdigest()[:16]
         usage = None if self._cost is None else ProviderUsage(cost=self._cost)
         return GeneratedImage(self.image, rid, usage)
@@ -89,7 +100,15 @@ class FlakyImageGenerator(FixedImageGenerator):
     ) -> GeneratedImage:
         if self._failures_left > 0:
             self._failures_left -= 1
-            self.calls.append(GenerateCall(prompt, params, len(reference_images), face_crop))
+            self.calls.append(
+                GenerateCall(
+                    prompt,
+                    params,
+                    len(reference_images),
+                    face_crop,
+                    reference_images[0] if reference_images else None,
+                )
+            )
             raise ConnectionError("provider unreachable")
         return await super().generate(
             prompt=prompt,

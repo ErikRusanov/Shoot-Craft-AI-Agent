@@ -48,6 +48,7 @@ from protocols import (
     FaceAnalyzer,
     ImageGenerator,
     ObjectStorage,
+    PromptWriter,
     SlotFiller,
     StateStore,
     UseCaseClassifier,
@@ -64,6 +65,7 @@ from services.connectors import (
     LocalObjectStorage,
     OpenRouterClient,
     OpenRouterImageGenerator,
+    OpenRouterPromptWriter,
     OpenRouterSlotFiller,
     OpenRouterUseCaseClassifier,
     RedisEventBus,
@@ -76,6 +78,7 @@ from services.generation_loop import GenerationLoop
 from services.idempotency import IdempotencyService
 from services.preset_matcher import PresetLibrary, load_library
 from services.pricing import PricingTable
+from services.prompt_writer import DeterministicPromptWriter
 from services.quality_gate import GateThresholds, QualityGate
 from services.slot_filler import DefaultSlotFiller
 from services.telemetry import Telemetry
@@ -404,12 +407,14 @@ def build_container(settings: Settings) -> Container:
     generator: ImageGenerator
     slot_filler: SlotFiller
     classifier: UseCaseClassifier
+    writer: PromptWriter
     analyzer: FaceAnalyzer
     embedder: Embedder
     if settings.fake_connectors:
         generator = FakeImageGenerator()
         slot_filler = DefaultSlotFiller()
         classifier = TokenOverlapClassifier()
+        writer = DeterministicPromptWriter()
         face_engine = FakeFaceEngine()
         analyzer, embedder = face_engine, face_engine
     else:
@@ -422,6 +427,7 @@ def build_container(settings: Settings) -> Container:
         generator = OpenRouterImageGenerator(openrouter, model=settings.generation_model)
         slot_filler = OpenRouterSlotFiller(openrouter, model=settings.slot_filler_model)
         classifier = OpenRouterUseCaseClassifier(openrouter, model=settings.classifier_model)
+        writer = OpenRouterPromptWriter(openrouter, model=settings.slot_filler_model)
         # One InsightFace pack serves both ports from a single inference pass.
         insight = InsightFaceEmbedder(
             model_pack=settings.insightface_model,
@@ -451,6 +457,7 @@ def build_container(settings: Settings) -> Container:
             storage=storage,
             bus=bus,
             generator=generator,
+            writer=writer,
             facecheck=FaceCheckService(embedder),
             budget=budget,
             pricing=pricing,

@@ -101,7 +101,7 @@ def build_prompt(preset: Preset, slots: Mapping[str, str], *, addendum: str = ""
     Raises ``ValueError`` on any slot that is unknown to the preset, missing
     for a placeholder, or outside the slot's declared ``enum``.
     """
-    _validate_slots(preset, slots)
+    _validate_slots(preset, slots, sanitize_freeform=True)
     structure = _PLACEHOLDER.sub(lambda m: slots[m.group(1)], preset.prompt_structure)
 
     parts = [preset.identity_instruction, structure]
@@ -123,7 +123,10 @@ def fill_template(preset: Preset, slots: Mapping[str, str], *, addendum: str = "
     builder's to add in :func:`assemble_prompt`). Slots are validated exactly as
     the legacy path validates them.
     """
-    _validate_slots(preset, slots)
+    # Structural validation only — the body's free-form text is sanitized once,
+    # downstream, by :func:`assemble_prompt`, not here (else the scene would be
+    # checked twice and could reject early before assembly).
+    _validate_slots(preset, slots, sanitize_freeform=False)
     structure = _PLACEHOLDER.sub(lambda m: slots[m.group(1)], preset.prompt_structure)
     if addendum.strip():
         return f"{structure}\n\n{addendum.strip()}"
@@ -171,7 +174,7 @@ def _reject_body_injection(preset: Preset, body: str) -> None:
             )
 
 
-def _validate_slots(preset: Preset, slots: Mapping[str, str]) -> None:
+def _validate_slots(preset: Preset, slots: Mapping[str, str], *, sanitize_freeform: bool) -> None:
     unknown = set(slots) - set(preset.slots)
     if unknown:
         raise ValueError(f"preset {preset.id!r}: unknown slots {sorted(unknown)}")
@@ -183,8 +186,10 @@ def _validate_slots(preset: Preset, slots: Mapping[str, str]) -> None:
     for name, value in slots.items():
         enum = preset.slots[name].enum
         if enum is None:
-            # Free-form slot: no vocabulary to check, sanitize the text instead.
-            _reject_injection(preset, name, value)
+            # Free-form slot: no vocabulary to check. The legacy path sanitizes the
+            # text here; the writer path defers it to assemble_prompt on the body.
+            if sanitize_freeform:
+                _reject_injection(preset, name, value)
         elif value not in {str(option) for option in enum}:
             raise ValueError(
                 f"preset {preset.id!r}: slot {name!r} value {value!r} is not in its vocabulary"
