@@ -20,6 +20,7 @@ from services.connectors.openrouter_generator import (
     NoImageGeneratedError,
     OpenRouterImageGenerator,
 )
+from services.connectors.openrouter_planner import OpenRouterStepPlanner
 from services.connectors.openrouter_prompt_writer import OpenRouterPromptWriter
 from services.connectors.openrouter_slot_filler import OpenRouterSlotFiller
 from services.connectors.redis_event_bus import RedisEventBus
@@ -40,6 +41,7 @@ __all__ = [
     "OpenRouterImageGenerator",
     "OpenRouterPromptWriter",
     "OpenRouterSlotFiller",
+    "OpenRouterStepPlanner",
     "OpenRouterUseCaseClassifier",
     "RedisEventBus",
     "RedisStateStore",

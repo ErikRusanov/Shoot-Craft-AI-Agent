@@ -13,7 +13,7 @@ import pytest
 
 from config import Settings
 from schemas import CostEstimate, Preset
-from services.estimator import estimate_cost
+from services.estimator import affordable_step_count, estimate_cost, expected_per_step
 from services.preset_matcher import PresetLibrary, load_library
 from services.pricing import PricingTable
 
@@ -96,6 +96,47 @@ def test_monotone_in_budget(headshot: Preset, pricing: PricingTable) -> None:
 
 def test_deterministic(headshot: Preset, pricing: PricingTable) -> None:
     assert _estimate(headshot, pricing, "0.30") == _estimate(headshot, pricing, "0.30")
+
+
+def test_multi_step_forecast_sums_over_steps(headshot: Preset, pricing: PricingTable) -> None:
+    # default expected = 3 per step; 2 steps under a generous budget → 6.
+    estimate = estimate_cost(
+        headshot,
+        budget_limit=Decimal("10"),
+        pricing=pricing,
+        generation_model=GEN,
+        default_expected_generations=DEFAULT_EXPECTED,
+        step_count=2,
+    )
+    assert estimate.generations == 6
+    assert estimate.note is None
+
+
+def test_multi_step_capped_by_budget(headshot: Preset, pricing: PricingTable) -> None:
+    estimate = estimate_cost(
+        headshot,
+        budget_limit=Decimal("0.20"),
+        pricing=pricing,
+        generation_model=GEN,
+        default_expected_generations=DEFAULT_EXPECTED,
+        step_count=3,
+    )
+    assert estimate.generations < 9
+    assert estimate.note is not None and "capped" in estimate.note
+
+
+def test_affordable_step_count(headshot: Preset, pricing: PricingTable) -> None:
+    per_step = expected_per_step(headshot, DEFAULT_EXPECTED)
+    assert per_step == DEFAULT_EXPECTED
+    # ~$0.08 per padded reservation: $0.30 affords ~3 generations → 1 full step.
+    steps = affordable_step_count(
+        headshot,
+        budget_limit=Decimal("0.30"),
+        pricing=pricing,
+        generation_model=GEN,
+        default_expected_generations=DEFAULT_EXPECTED,
+    )
+    assert steps == 1
 
 
 def test_invalid_inputs_raise(avatar: Preset, pricing: PricingTable) -> None:

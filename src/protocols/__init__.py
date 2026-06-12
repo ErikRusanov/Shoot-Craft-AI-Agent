@@ -15,6 +15,7 @@ from protocols.event_bus import EventBus, StreamedEvent
 from protocols.face_analyzer import DetectedFace, FaceAnalyzer
 from protocols.generator import GeneratedImage, GenerationRefusedError, ImageGenerator
 from protocols.object_storage import ObjectStorage
+from protocols.planner import PlanResult, StepPlanner
 from protocols.prompt_writer import (
     PromptWriter,
     WriteRequest,
@@ -38,10 +39,12 @@ __all__ = [
     "ImageGenerator",
     "ObjectStorage",
     "ParseResult",
+    "PlanResult",
     "PromptWriter",
     "SlotFill",
     "SlotFiller",
     "StateStore",
+    "StepPlanner",
     "StreamedEvent",
     "UseCaseClassifier",
     "WriteRequest",
