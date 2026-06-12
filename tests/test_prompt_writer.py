@@ -17,7 +17,7 @@ from config import Settings
 from graph.nodes import _locked_conflicts
 from protocols import BudgetMeter
 from protocols.prompt_writer import WriteRequest, WriterFeedback
-from schemas import BriefAnalysis, Change, Preset
+from schemas import BriefAnalysis, Change, PhotoInventory, Preset, Verdict
 from services.budget import BudgetService
 from services.connectors import InMemoryStateStore, OpenRouterPromptWriter
 from services.preset_matcher import PresetLibrary, load_library
@@ -231,3 +231,46 @@ async def test_llm_revise_garbage_degrades_to_emphasized_prev() -> None:
 
     result = await writer.revise("old body", WriterFeedback(0.6, None), request=req)
     assert result.body == emphasize("old body")
+
+
+async def test_llm_system_prompt_is_mode_keyed() -> None:
+    client, transport = scripted_client(_body_body("x"))
+    writer = OpenRouterPromptWriter(client, model=MODEL)
+
+    await writer.compose(_request(mode="edit"))
+    await writer.compose(_request(mode="generate"))
+
+    edit_system = json.loads(transport.requests[0].content)["messages"][0]["content"]
+    gen_system = json.loads(transport.requests[1].content)["messages"][0]["content"]
+    assert "Describe ONLY the requested change" in edit_system
+    assert "Never re-describe the person" in edit_system
+    assert "describe the target image built around the person" in gen_system
+
+
+async def test_llm_view_carries_inventory_applied_and_attempt() -> None:
+    client, transport = scripted_client(_body_body("x"))
+    writer = OpenRouterPromptWriter(client, model=MODEL)
+    req = _request()._replace(
+        inventory=PhotoInventory(lighting="soft window light from the left"),
+        applied=("the new dark stage backdrop",),
+    )
+
+    await writer.compose(req)
+    await writer.revise("old body", WriterFeedback(0.6, Verdict.SOFT, 2), request=req)
+
+    composed = json.loads(json.loads(transport.requests[0].content)["messages"][1]["content"])
+    assert composed["photo_inventory"]["lighting"] == "soft window light from the left"
+    assert composed["already_applied"] == ["the new dark stage backdrop"]
+    revised = json.loads(json.loads(transport.requests[1].content)["messages"][1]["content"])
+    assert revised["previous_attempt"] == 2
+    assert revised["previous_verdict"] == "soft"
+
+
+async def test_llm_empty_inventory_is_sent_as_null() -> None:
+    client, transport = scripted_client(_body_body("x"))
+    writer = OpenRouterPromptWriter(client, model=MODEL)
+
+    await writer.compose(_request()._replace(inventory=PhotoInventory()))
+
+    view = json.loads(json.loads(transport.requests[0].content)["messages"][1]["content"])
+    assert view["photo_inventory"] is None

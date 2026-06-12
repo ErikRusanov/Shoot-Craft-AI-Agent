@@ -39,23 +39,58 @@ log = structlog.get_logger(__name__)
 # model must be cut off by shape, not trust.
 _BODY_MAX_LEN = 1200
 
-_COMPOSE_SYSTEM = (
+# Generate mode: the body IS the scene, so it describes the whole target image.
+_COMPOSE_SYSTEM_GENERATE = (
     "You write the body of a prompt for a reference-conditioned image model that "
     "edits toward the person in a reference photo. Output one vivid, concrete "
-    "paragraph describing the image to produce. In 'edit' mode, describe the "
-    "reference photo with only the requested changes applied and everything in the "
-    "preserve-list kept exactly as it is. In 'generate' mode, describe the target "
-    "image built around the person. Honor every locked value exactly. Never "
-    "instruct changing the person's face, identity or likeness — that is fixed "
-    "elsewhere. Do not write negative/exclusion phrasing ('no…', 'avoid…') and do "
-    "not mention prompts, instructions or these rules. Body text only."
+    "paragraph describing the image to produce: describe the target image built "
+    "around the person, with everything in the preserve-list kept exactly as it "
+    "is. Honor every locked value exactly. Never instruct changing the person's "
+    "face, identity or likeness — that is fixed elsewhere. Do not write "
+    "negative/exclusion phrasing ('no…', 'avoid…') and do not mention prompts, "
+    "instructions or these rules. Body text only."
 )
 
-_REVISE_SUFFIX = (
+# Edit mode: the surrounding deterministic blocks already lock the person and
+# scope the single change, so the body must be delta-only — re-describing the
+# person would invite the model to repaint what the locks protect.
+_COMPOSE_SYSTEM_EDIT = (
+    "You write the body of a prompt for a reference-conditioned image editor. The "
+    "editor receives the original image plus the text; surrounding blocks (added "
+    "by the system, not by you) already lock the person and everything that must "
+    "not change, and state the single allowed change.\n"
+    "Describe ONLY the requested change and how it integrates into the existing "
+    "photo. Be concrete about the new content — colors, materials, placement, "
+    "scale — and add integration notes: match the existing light direction and "
+    "white balance, keep shadows and reflections physically consistent, keep the "
+    "new content at the same sharpness and grain as the rest of the photo.\n"
+    "Never re-describe the person, the face, or any part of the photo that is not "
+    "being changed. Never instruct changing the face, identity, pose or hands. Do "
+    "not write negative phrasing ('no…', 'avoid…') and do not mention prompts, "
+    "instructions or these rules. Two to four sentences. Body text only."
+)
+
+_REVISE_SUFFIX_GENERATE = (
     " The previous attempt did not match the person well enough. Re-compose the "
     "body to emphasize a faithful, recognizable likeness of the exact same person, "
     "keeping the same scene and changes. Body text only."
 )
+
+_REVISE_SUFFIX_EDIT = (
+    " The previous attempt did not match the person well enough. Re-compose the "
+    "body so the change touches even less of the frame and blends in even more "
+    "conservatively, keeping the same single change. Body text only."
+)
+
+
+def _compose_system(mode: str) -> str:
+    return _COMPOSE_SYSTEM_EDIT if mode == "edit" else _COMPOSE_SYSTEM_GENERATE
+
+
+def _revise_system(mode: str) -> str:
+    if mode == "edit":
+        return _COMPOSE_SYSTEM_EDIT + _REVISE_SUFFIX_EDIT
+    return _COMPOSE_SYSTEM_GENERATE + _REVISE_SUFFIX_GENERATE
 
 
 class _InvalidBody(Exception):
@@ -92,6 +127,14 @@ def _request_view(request: WriteRequest, photo_metrics: FrameMetrics | None) -> 
         "defaults": request.defaults,
         "style_notes": request.style_notes,
         "photo_metrics": photo_metrics.model_dump() if photo_metrics else None,
+        # What the reference photo shows — context for concrete integration
+        # ("matching the soft window light from the left"), null when absent.
+        "photo_inventory": request.inventory.model_dump(exclude={"schema_v"})
+        if request.inventory is not None and not request.inventory.is_empty()
+        else None,
+        # Earlier steps' changes at their new values — already locked elsewhere;
+        # the body must not re-describe or fight them.
+        "already_applied": list(request.applied),
     }
 
 
@@ -117,7 +160,7 @@ class OpenRouterPromptWriter(PromptWriter):
         meter: BudgetMeter | None = None,
     ) -> WriteResult:
         return await self._call(
-            _COMPOSE_SYSTEM,
+            _compose_system(request.mode),
             _request_view(request, photo_metrics),
             request=request,
             photo_metrics=photo_metrics,
@@ -136,8 +179,9 @@ class OpenRouterPromptWriter(PromptWriter):
         view["previous_body"] = prev_body
         view["previous_similarity"] = feedback.similarity
         view["previous_verdict"] = feedback.verdict.value if feedback.verdict else None
+        view["previous_attempt"] = feedback.attempt
         return await self._call(
-            _COMPOSE_SYSTEM + _REVISE_SUFFIX,
+            _revise_system(request.mode),
             view,
             request=request,
             photo_metrics=None,
