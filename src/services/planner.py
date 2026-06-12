@@ -2,8 +2,10 @@
 plus the budget-trim that keeps a plan honest.
 
 The deterministic plan is the simplest faithful one: a generate-mode brief is a
-single step; an edit-mode brief is one step per change. No merging, no splitting
-— that judgment is the LLM planner's; this is the stable baseline the pipeline
+single step; an edit-mode brief is one step per change, ordered from scene-level
+changes toward face-adjacent ones (identity drift compounds along the chain, so
+the risky edits run last, on a frame that already converged). No merging — that
+judgment is the LLM planner's; this is the stable baseline the pipeline
 degrades to.
 
 :func:`fit_to_budget` is separate and always deterministic: when the budget
@@ -18,11 +20,68 @@ from collections.abc import Sequence
 
 from protocols.budget import BudgetMeter
 from protocols.planner import PlanResult
-from schemas import BriefAnalysis, EditStep
+from schemas import BriefAnalysis, Change, EditStep, PhotoInventory
+
+# Identity-sensitivity ranking for the deterministic order: scene-level first
+# (0), body/clothing next (1), accessories and face-adjacent items last (2).
+# Unknown targets rank with clothing (1) — riskier than the scene, safer than
+# the face. The sort is stable, so the brief's order survives within a rank.
+_REGION_RANK: tuple[tuple[frozenset[str], int], ...] = (
+    (
+        frozenset(
+            {
+                "background",
+                "backdrop",
+                "setting",
+                "scene",
+                "environment",
+                "lighting",
+                "light",
+                "grade",
+                "color",
+                "colour",
+                "tone",
+            }
+        ),
+        0,
+    ),
+    (
+        frozenset(
+            {
+                "accessory",
+                "accessories",
+                "glasses",
+                "sunglasses",
+                "earring",
+                "earrings",
+                "earbud",
+                "headset",
+                "hat",
+                "cap",
+                "mic",
+                "microphone",
+                "jewelry",
+                "jewellery",
+                "necklace",
+                "headphones",
+            }
+        ),
+        2,
+    ),
+)
+_DEFAULT_RANK = 1
+
+
+def _rank(change: Change) -> int:
+    tokens = set(change.target.lower().replace("_", " ").split())
+    for vocabulary, rank in _REGION_RANK:
+        if tokens & vocabulary:
+            return rank
+    return _DEFAULT_RANK
 
 
 def deterministic_steps(analysis: BriefAnalysis) -> list[EditStep]:
-    """One change = one step (edit); a single step (generate)."""
+    """One change = one step (edit, scene-first order); a single step (generate)."""
     if analysis.mode == "generate":
         instruction = "; ".join(c.instruction for c in analysis.changes)
         if not instruction:
@@ -37,9 +96,10 @@ def deterministic_steps(analysis: BriefAnalysis) -> list[EditStep]:
                 targets=[c.target for c in analysis.changes],
             )
         ]
+    ordered = sorted(analysis.changes, key=_rank)
     return [
         EditStep(n=i, title=c.target, instruction=c.instruction, targets=[c.target])
-        for i, c in enumerate(analysis.changes, start=1)
+        for i, c in enumerate(ordered, start=1)
     ]
 
 
@@ -64,8 +124,12 @@ class DeterministicStepPlanner:
     """Free :class:`~protocols.planner.StepPlanner` — one change = one step, no calls."""
 
     async def plan(
-        self, *, analysis: BriefAnalysis, meter: BudgetMeter | None = None
+        self,
+        *,
+        analysis: BriefAnalysis,
+        inventory: PhotoInventory | None = None,
+        meter: BudgetMeter | None = None,
     ) -> PlanResult:
-        # meter is part of the port for the LLM planner's benefit; the
-        # deterministic fallback is free and never reserves.
+        # inventory/meter are part of the port for the LLM planner's benefit;
+        # the deterministic fallback is free and resolves nothing against the photo.
         return PlanResult(steps=deterministic_steps(analysis))

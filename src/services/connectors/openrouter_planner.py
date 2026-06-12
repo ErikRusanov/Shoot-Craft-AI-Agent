@@ -1,8 +1,9 @@
-"""LLM-backed :class:`~protocols.planner.StepPlanner` via a cheap model.
+"""LLM-backed :class:`~protocols.planner.StepPlanner`.
 
-Decides the one judgment the deterministic plan cannot: which edit changes merge
-into a single step (background + lighting in one edit) and which split into
-ordered steps (a t-shirt, then a microphone). Structured output
+Decides the judgments the deterministic plan cannot: the exact step order, which
+same-region scene tweaks merge into one edit, how each instruction resolves
+against the photo inventory ("replace the existing earbud…", not "add a
+headset"), and the ``applied`` phrase later steps lock. Structured output
 (``response_format: json_schema``, ``strict``) returns the steps; every input
 target must be covered exactly once, validated here, so the planner can neither
 drop nor invent a change.
@@ -23,20 +24,41 @@ import structlog
 
 from protocols.budget import BudgetMeter
 from protocols.planner import PlanResult, StepPlanner
-from schemas import BriefAnalysis, EditStep, PaidCallKind
+from schemas import BriefAnalysis, EditStep, PaidCallKind, PhotoInventory
 from services.connectors.openrouter_client import OpenRouterClient, parse_usage
 from services.planner import DeterministicStepPlanner
 
 log = structlog.get_logger(__name__)
 
+# One change per step is the rule, not the exception: every pass through the
+# editor risks the face, but a narrow pass regenerates less — the lock block
+# around each step can only say "the ONLY change allowed" when the step really
+# is one change.
 _SYSTEM_PROMPT = (
-    "You order a list of photo-edit changes into steps for a reference-conditioned "
-    "image editor that applies one edit at a time and chains results. Merge changes "
-    "that can be applied together in a single edit (e.g. background and lighting) "
-    "into one step; split independent changes (e.g. changing clothing, then adding a "
-    "held object) into separate ordered steps. Each step gets a short title, a "
-    "combined instruction, and the list of target names it covers. Every input "
-    "target must appear in exactly one step. Do not invent or drop targets."
+    "You order a list of requested photo-edit changes into steps for a "
+    "reference-conditioned image editor that applies ONE edit at a time and chains "
+    "results: the output of step 1 is the input of step 2. Identity drift compounds "
+    "with every pass, so minimize the number of passes and the risk per pass.\n"
+    "Rules:\n"
+    "- One change per step by default. Merge changes into a single step ONLY when "
+    "they describe the same scene region: background, ambient lighting and overall "
+    "color grade may merge into one step. Nothing else merges — never merge a "
+    "clothing change with an accessory change, and never merge anything with a "
+    "change near the face.\n"
+    "- Order steps from least to most identity-sensitive: (1) scene-level changes "
+    "(background, setting, lighting, color grade) first; (2) clothing and "
+    "body-level changes next; (3) accessories and anything close to the face "
+    "(glasses, earrings, a headset, a hat) last.\n"
+    "- Make each instruction self-contained and concrete. Resolve references "
+    "against the photo inventory when provided: write 'replace the existing white "
+    "earbud in the left ear with a black over-ear headset microphone', not 'add a "
+    "headset'. Name colors, materials and placement explicitly.\n"
+    "- For each step also write 'applied': a short noun phrase naming the changed "
+    "attribute at its NEW value once the step is done (e.g. 'the new plain white "
+    "crew-neck t-shirt'). Later steps will lock this phrase as untouchable.\n"
+    "- Each step gets a short title, the instruction, the list of target names it "
+    "covers, and 'applied'. Every input target must appear in exactly one step. "
+    "Do not invent or drop targets."
 )
 
 
@@ -56,8 +78,9 @@ def _response_schema() -> dict[str, Any]:
                         "title": {"type": "string"},
                         "instruction": {"type": "string"},
                         "targets": {"type": "array", "items": {"type": "string"}},
+                        "applied": {"type": "string"},
                     },
-                    "required": ["title", "instruction", "targets"],
+                    "required": ["title", "instruction", "targets", "applied"],
                     "additionalProperties": False,
                 },
             }
@@ -99,8 +122,17 @@ def _parse_steps(body: dict[str, Any], analysis: BriefAnalysis) -> list[EditStep
         if covered & set(clean):
             raise _InvalidPlan("a target is covered by more than one step")
         covered.update(clean)
+        # `applied` is advisory: an empty/missing phrase degrades to the loop's
+        # generic fallback, never invalidates an otherwise sound plan.
+        applied = item.get("applied")
         steps.append(
-            EditStep(n=i, title=title.strip(), instruction=instruction.strip(), targets=clean)
+            EditStep(
+                n=i,
+                title=title.strip(),
+                instruction=instruction.strip(),
+                targets=clean,
+                applied=applied.strip() if isinstance(applied, str) else "",
+            )
         )
 
     if covered != wanted:
@@ -123,7 +155,11 @@ class OpenRouterStepPlanner(StepPlanner):
         self._fallback = fallback if fallback is not None else DeterministicStepPlanner()
 
     async def plan(
-        self, *, analysis: BriefAnalysis, meter: BudgetMeter | None = None
+        self,
+        *,
+        analysis: BriefAnalysis,
+        inventory: PhotoInventory | None = None,
+        meter: BudgetMeter | None = None,
     ) -> PlanResult:
         if analysis.mode == "generate" or len(analysis.changes) < 2:
             # Nothing to decide — the deterministic single/one-step plan, free.
@@ -135,7 +171,7 @@ class OpenRouterStepPlanner(StepPlanner):
             log.warning("planner_budget_exhausted")
             return await self._fallback.plan(analysis=analysis)
         try:
-            body = await self._client.chat_completion(self._payload(analysis))
+            body = await self._client.chat_completion(self._payload(analysis, inventory))
             steps = _parse_steps(body, analysis)
             usage = parse_usage(body)
             if reservation is None:
@@ -150,11 +186,16 @@ class OpenRouterStepPlanner(StepPlanner):
             log.warning("planner_llm_fallback", error=repr(exc))
             return await self._fallback.plan(analysis=analysis)
 
-    def _payload(self, analysis: BriefAnalysis) -> dict[str, Any]:
+    def _payload(self, analysis: BriefAnalysis, inventory: PhotoInventory | None) -> dict[str, Any]:
         user_message = {
             "changes": [
                 {"target": c.target, "instruction": c.instruction} for c in analysis.changes
-            ]
+            ],
+            # What the photo actually shows, so instructions resolve concretely;
+            # null when no inventory was extracted.
+            "photo_inventory": inventory.model_dump(exclude={"schema_v"})
+            if inventory is not None and not inventory.is_empty()
+            else None,
         }
         return {
             "model": self._model,

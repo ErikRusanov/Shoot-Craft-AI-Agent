@@ -421,7 +421,12 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         meter = svc.budget.meter(
             session_key, limit=budget_limit, ttl_seconds=svc.session_ttl_seconds
         )
-        plan_result = await svc.planner.plan(analysis=analysis, meter=meter)
+        face = await svc.store.get_face(state["face_key"])
+        plan_result = await svc.planner.plan(
+            analysis=analysis,
+            inventory=face.inventory if face is not None else None,
+            meter=meter,
+        )
         raw_steps = plan_result.steps or deterministic_steps(analysis)
         if plan_result.cost > 0:
             session.llm_calls.append(
