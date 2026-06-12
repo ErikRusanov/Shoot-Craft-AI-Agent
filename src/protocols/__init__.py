@@ -7,6 +7,7 @@ substitute in-memory fakes at this same seam.
 
 from __future__ import annotations
 
+from protocols.brief_parser import BriefParser, ParseResult
 from protocols.budget import BudgetMeter, BudgetReservation
 from protocols.classifier import ClassifyResult, UseCaseClassifier
 from protocols.embedder import Embedder
@@ -18,6 +19,7 @@ from protocols.slot_filler import SlotFill, SlotFiller
 from protocols.state_store import StateStore
 
 __all__ = [
+    "BriefParser",
     "BudgetMeter",
     "BudgetReservation",
     "ClassifyResult",
@@ -29,6 +31,7 @@ __all__ = [
     "GenerationRefusedError",
     "ImageGenerator",
     "ObjectStorage",
+    "ParseResult",
     "SlotFill",
     "SlotFiller",
     "StateStore",
