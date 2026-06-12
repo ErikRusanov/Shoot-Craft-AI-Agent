@@ -29,11 +29,13 @@ from typing import Any, Protocol
 from langgraph.types import interrupt
 
 from graph.state import GraphState
-from protocols import EventBus, ObjectStorage, SlotFiller, StateStore, UseCaseClassifier
+from protocols import BriefParser, EventBus, ObjectStorage, SlotFiller, StateStore, StepPlanner
 from schemas import (
+    BriefAnalysis,
     CompositionChoice,
     CostEvent,
     DoneEvent,
+    EditStep,
     FailedEvent,
     FailureCode,
     FsmState,
@@ -50,12 +52,12 @@ from schemas import (
     Verdict,
 )
 from services.budget import BudgetService
-from services.classifier import FALLBACK_USE_CASE
-from services.estimator import estimate_cost
+from services.estimator import affordable_step_count, estimate_cost
 from services.generation_loop import GenerationLoop
+from services.planner import deterministic_steps, fit_to_budget
 from services.preset_matcher import PresetLibrary
 from services.pricing import PricingTable
-from services.prompt_builder import FreeFormRejectedError, build_prompt
+from services.prompt_builder import FreeFormRejectedError, assemble_prompt, fill_template
 from services.slot_filler import apply_composition
 from services.vision import VisionService, face_crop_ref, photo_ref
 from utils.money import from_micro
@@ -79,7 +81,8 @@ class GraphServices:
     vision: VisionService
     library: PresetLibrary
     slot_filler: SlotFiller
-    classifier: UseCaseClassifier
+    brief_parser: BriefParser
+    planner: StepPlanner
     generation_loop: GenerationLoop
     budget: BudgetService
     pricing: PricingTable
@@ -111,6 +114,37 @@ def _failure(
     reason: str, *, gate_reason: str | None = None, code: FailureCode = FailureCode.INTERNAL
 ) -> dict[str, Any]:
     return {"failure": {"reason": reason, "gate_reason": gate_reason, "code": code.value}}
+
+
+def _locked_conflicts(preset: Preset, analysis: BriefAnalysis) -> list[str]:
+    """Changes that target a locked attribute — surfaced; the lock still wins."""
+    locked = {name for name, slot in preset.slots.items() if slot.policy == "locked"}
+    return [
+        f"requested change to '{change.target}' conflicts with a locked attribute "
+        f"(the preset's fixed value is kept)"
+        for change in analysis.changes
+        if change.target in locked
+    ]
+
+
+def _plan_summary(
+    preset: Preset,
+    analysis: BriefAnalysis,
+    steps: list[EditStep],
+    slots: dict[str, str],
+    trim_note: str | None,
+) -> str:
+    """Human-readable plan: the ordered steps (edit) or the styled target (generate)."""
+    if analysis.mode == "edit" and steps:
+        body = "; ".join(f"{s.n}. {s.title}: {s.instruction}" for s in steps)
+    else:
+        body = ", ".join(f"{name}={value}" for name, value in sorted(slots.items()))
+    summary = f"{preset.id} v{preset.version}: {body}"
+    if analysis.conflicts:
+        summary += " | conflicts (locked attributes win): " + "; ".join(analysis.conflicts)
+    if trim_note:
+        summary += f" | {trim_note}"
+    return summary
 
 
 def _question_for(name: str, slot: Slot, *, reask_reason: str | None) -> str:
@@ -191,33 +225,35 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
             )
         return {}
 
-    async def classify(state: GraphState) -> dict[str, Any]:
-        """Resolve ``use_case`` from the user's free-text brief when the caller
-        gave none — a paid LLM call (budgeted) with a free deterministic fallback.
+    async def parse_brief(state: GraphState) -> dict[str, Any]:
+        """Read the brief into a :class:`BriefAnalysis` — mode, preserve-list,
+        changes, conflicts — replacing the lone use-case token.
 
-        A caller-supplied ``use_case`` passes through untouched; an empty brief
-        needs no call and resolves to the reserved fallback preset.
+        A budgeted LLM call with a free deterministic fallback (it never fails):
+        a caller-supplied ``use_case`` steers a target-driven generate; otherwise
+        the parser decides edit vs generate and picks the ``use_case``. The
+        analysis is stored on the session; resolution and planning read it there.
         """
-        if state["use_case"]:
-            return {}
-        brief = state.get("brief", "")
-        if not brief.strip():
-            return {"use_case": FALLBACK_USE_CASE}
         meter = svc.budget.meter(
             state["session_key"],
             limit=from_micro(state["budget_limit"]),
             ttl_seconds=svc.session_ttl_seconds,
         )
-        result = await svc.classifier.classify(
-            brief=brief, use_cases=svc.library.use_case_tokens, meter=meter
+        result = await svc.brief_parser.parse(
+            brief=state.get("brief", ""),
+            use_case=state["use_case"] or None,
+            use_cases=svc.library.use_case_tokens,
+            meter=meter,
         )
+        session = await _session(state["session_key"])
+        session.brief_analysis = result.analysis
         if result.cost > 0:
-            session = await _session(state["session_key"])
             session.llm_calls.append(
                 PaidCallRecord(kind=PaidCallKind.CLASSIFY, cost=result.cost, usage=result.usage)
             )
-            await _checkpoint(session)
-        return {"use_case": result.use_case}
+        await _checkpoint(session)
+        # Empty use_case (an edit) resolves to the fallback edit preset.
+        return {"use_case": result.analysis.use_case or ""}
 
     async def ask(state: GraphState) -> dict[str, Any]:
         """The single clarifying question — the preset's ``ask:true`` slot."""
@@ -254,12 +290,14 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         )
         return {"answer": str(answer)}
 
-    async def match_fill(state: GraphState) -> dict[str, Any]:
-        """Resolve the preset, fill every slot, validate by building the prompt.
+    async def resolve_constraints(state: GraphState) -> dict[str, Any]:
+        """Resolve the preset by mode+use_case, fill its slots, validate by
+        assembling the writer-path body, and surface locked-attribute conflicts.
 
         A free-form answer that reads as a prompt injection routes back to
         ``ask`` (bounded by MAX_REASKS) — the poisoned text never survives in
-        state or in the session record.
+        state or in the session record. Locked attributes a change would fight are
+        recorded as conflicts (the lock still wins in the loop), never dropped.
         """
         session_key = state["session_key"]
         await svc.bus.publish(session_key, StageEvent(stage=FsmState.PLANNING))
@@ -278,7 +316,9 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
             meter=meter,
         )
         try:
-            build_prompt(preset, fill.slots, addendum=fill.addendum)
+            # Validate via the writer-assembly path: the deterministic body is the
+            # filled template, sanitized by assemble_prompt exactly as before.
+            assemble_prompt(preset, fill_template(preset, fill.slots, addendum=fill.addendum))
         except FreeFormRejectedError:
             if state.get("reasks", 0) >= MAX_REASKS:
                 return _failure(
@@ -292,6 +332,11 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
             }
 
         session = await _session(session_key)
+        analysis = session.brief_analysis or BriefAnalysis(mode="generate", use_case=preset.id)
+        analysis = analysis.model_copy(
+            update={"conflicts": [*analysis.conflicts, *_locked_conflicts(preset, analysis)]}
+        )
+        session.brief_analysis = analysis
         session.fsm_state = FsmState.PLANNING
         session.preset_id = preset.id
         session.preset_version = preset.version
@@ -315,29 +360,58 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
             "reask_reason": None,
         }
 
-    async def plan(state: GraphState) -> dict[str, Any]:
-        """Forecast the spend and publish the plan for approval."""
+    async def plan_steps(state: GraphState) -> dict[str, Any]:
+        """Cut the changes into ordered steps, trim to budget, forecast, publish.
+
+        The plan the user approves is the step plan. The forecast sums over the
+        steps the budget can fund; trailing steps that don't fit are marked
+        ``skipped`` (visible, never a silent cap).
+        """
         session_key = state["session_key"]
         preset = _resolve(state)
-        cost = estimate_cost(
+        budget_limit = from_micro(state["budget_limit"])
+        session = await _session(session_key)
+        analysis = session.brief_analysis or BriefAnalysis(mode="generate", use_case=preset.id)
+
+        meter = svc.budget.meter(
+            session_key, limit=budget_limit, ttl_seconds=svc.session_ttl_seconds
+        )
+        plan_result = await svc.planner.plan(analysis=analysis, meter=meter)
+        raw_steps = plan_result.steps or deterministic_steps(analysis)
+        if plan_result.cost > 0:
+            session.llm_calls.append(
+                PaidCallRecord(
+                    kind=PaidCallKind.SLOT_FILL, cost=plan_result.cost, usage=plan_result.usage
+                )
+            )
+
+        max_steps = affordable_step_count(
             preset,
-            budget_limit=from_micro(state["budget_limit"]),
+            budget_limit=budget_limit,
             pricing=svc.pricing,
             generation_model=svc.generation_model,
             default_expected_generations=svc.default_expected_generations,
         )
-        slots = state.get("slots", {})
+        steps, trim_note = fit_to_budget(raw_steps, max_steps)
+        kept = [s for s in steps if s.status != "skipped"]
+        cost = estimate_cost(
+            preset,
+            budget_limit=budget_limit,
+            pricing=svc.pricing,
+            generation_model=svc.generation_model,
+            default_expected_generations=svc.default_expected_generations,
+            step_count=max(len(kept), 1),
+        )
         proposed = Plan(
-            summary=f"{preset.id} v{preset.version}: "
-            + ", ".join(f"{name}={value}" for name, value in sorted(slots.items())),
+            summary=_plan_summary(preset, analysis, steps, state.get("slots", {}), trim_note),
             compositions=[
                 CompositionChoice(id=c.id, label=c.label, preview_asset=c.preview_asset)
                 for c in preset.compositions
             ],
             planned_generations=cost.generations,
+            steps=steps,
         )
 
-        session = await _session(session_key)
         session.plan = proposed
         session.cost_estimate = cost
         session.fsm_state = FsmState.AWAITING_APPROVAL
@@ -428,10 +502,10 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
     return {
         "analyze": analyze,
         "quality_gate": quality_gate,
-        "classify": classify,
+        "parse_brief": parse_brief,
         "ask": ask,
-        "match_fill": match_fill,
-        "plan": plan,
+        "resolve_constraints": resolve_constraints,
+        "plan_steps": plan_steps,
         "approve": approve,
         "generate": generate,
         "done": done,

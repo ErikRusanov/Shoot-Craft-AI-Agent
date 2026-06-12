@@ -2,14 +2,16 @@
 
 ::
 
-    analyze → quality_gate → classify → ask ⇄ match_fill → plan → approve → generate → done
-                    │                    │        │                  │          │
-                    └────────────────────┴────────┴──── fail ────────┘         END
+    analyze → quality_gate → parse_brief → ask ⇄ resolve_constraints
+        → plan_steps → approve → generate → done
+    (quality_gate / ask / resolve_constraints / approve can route to fail;
+     generate routes to done or straight to END)
 
-``classify`` derives ``use_case`` from the user's brief when the caller gave
-none (a budgeted LLM call with a deterministic fallback — it never fails).
-``ask`` and ``approve`` pause on ``interrupt()``; ``match_fill`` loops back to
-``ask`` when a free-form answer is rejected. ``generate`` routes to ``done``
+``parse_brief`` reads the brief into a BriefAnalysis (mode, preserve, changes,
+conflicts) — a budgeted LLM call with a deterministic fallback that never fails.
+``ask`` and ``approve`` pause on ``interrupt()``; ``resolve_constraints`` loops
+back to ``ask`` when a free-form answer is rejected. ``plan_steps`` decomposes
+the changes into the step plan the user approves. ``generate`` routes to ``done``
 on a delivered result and straight to END on a loop failure (the loop already
 published its own terminal event).
 
@@ -38,12 +40,12 @@ def _route_failure(next_node: str) -> Callable[[GraphState], str]:
     return route
 
 
-def _route_match_fill(state: GraphState) -> str:
+def _route_resolve(state: GraphState) -> str:
     if state.get("failure"):
         return "fail"
     if state.get("reask_reason"):
         return "ask"
-    return "plan"
+    return "plan_steps"
 
 
 def _route_generate(state: GraphState) -> str:
@@ -62,11 +64,17 @@ def build_graph(
 
     graph.add_edge(START, "analyze")
     graph.add_edge("analyze", "quality_gate")
-    graph.add_conditional_edges("quality_gate", _route_failure("classify"), ["fail", "classify"])
-    graph.add_edge("classify", "ask")
-    graph.add_conditional_edges("ask", _route_failure("match_fill"), ["fail", "match_fill"])
-    graph.add_conditional_edges("match_fill", _route_match_fill, ["fail", "ask", "plan"])
-    graph.add_edge("plan", "approve")
+    graph.add_conditional_edges(
+        "quality_gate", _route_failure("parse_brief"), ["fail", "parse_brief"]
+    )
+    graph.add_edge("parse_brief", "ask")
+    graph.add_conditional_edges(
+        "ask", _route_failure("resolve_constraints"), ["fail", "resolve_constraints"]
+    )
+    graph.add_conditional_edges(
+        "resolve_constraints", _route_resolve, ["fail", "ask", "plan_steps"]
+    )
+    graph.add_edge("plan_steps", "approve")
     graph.add_conditional_edges("approve", _route_failure("generate"), ["fail", "generate"])
     graph.add_conditional_edges("generate", _route_generate, ["done", END])
     graph.add_edge("done", END)

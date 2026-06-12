@@ -43,6 +43,7 @@ from graph.builder import build_graph
 from graph.nodes import GraphServices
 from graph.state import GraphState, initial_state
 from protocols import (
+    BriefParser,
     Embedder,
     EventBus,
     FaceAnalyzer,
@@ -51,11 +52,11 @@ from protocols import (
     PromptWriter,
     SlotFiller,
     StateStore,
-    UseCaseClassifier,
+    StepPlanner,
 )
 from schemas import FailedEvent, FailureCode, FsmState, NeedInputEvent, SessionState
+from services.brief_parser import DeterministicBriefParser
 from services.budget import BudgetService
-from services.classifier import TokenOverlapClassifier
 from services.connectors import (
     FakeFaceEngine,
     FakeImageGenerator,
@@ -63,11 +64,12 @@ from services.connectors import (
     InMemoryStateStore,
     InsightFaceEmbedder,
     LocalObjectStorage,
+    OpenRouterBriefParser,
     OpenRouterClient,
     OpenRouterImageGenerator,
     OpenRouterPromptWriter,
     OpenRouterSlotFiller,
-    OpenRouterUseCaseClassifier,
+    OpenRouterStepPlanner,
     RedisEventBus,
     RedisStateStore,
     S3ObjectStorage,
@@ -76,6 +78,7 @@ from services.connectors import (
 from services.facecheck import FaceCheckService
 from services.generation_loop import GenerationLoop
 from services.idempotency import IdempotencyService
+from services.planner import DeterministicStepPlanner
 from services.preset_matcher import PresetLibrary, load_library
 from services.pricing import PricingTable
 from services.prompt_writer import DeterministicPromptWriter
@@ -406,14 +409,16 @@ def build_container(settings: Settings) -> Container:
     openrouter: OpenRouterClient | None = None
     generator: ImageGenerator
     slot_filler: SlotFiller
-    classifier: UseCaseClassifier
+    brief_parser: BriefParser
+    planner: StepPlanner
     writer: PromptWriter
     analyzer: FaceAnalyzer
     embedder: Embedder
     if settings.fake_connectors:
         generator = FakeImageGenerator()
         slot_filler = DefaultSlotFiller()
-        classifier = TokenOverlapClassifier()
+        brief_parser = DeterministicBriefParser()
+        planner = DeterministicStepPlanner()
         writer = DeterministicPromptWriter()
         face_engine = FakeFaceEngine()
         analyzer, embedder = face_engine, face_engine
@@ -426,7 +431,8 @@ def build_container(settings: Settings) -> Container:
         )
         generator = OpenRouterImageGenerator(openrouter, model=settings.generation_model)
         slot_filler = OpenRouterSlotFiller(openrouter, model=settings.slot_filler_model)
-        classifier = OpenRouterUseCaseClassifier(openrouter, model=settings.classifier_model)
+        brief_parser = OpenRouterBriefParser(openrouter, model=settings.classifier_model)
+        planner = OpenRouterStepPlanner(openrouter, model=settings.slot_filler_model)
         writer = OpenRouterPromptWriter(openrouter, model=settings.slot_filler_model)
         # One InsightFace pack serves both ports from a single inference pass.
         insight = InsightFaceEmbedder(
@@ -451,7 +457,8 @@ def build_container(settings: Settings) -> Container:
         vision=vision,
         library=library,
         slot_filler=slot_filler,
-        classifier=classifier,
+        brief_parser=brief_parser,
+        planner=planner,
         generation_loop=GenerationLoop(
             store=store,
             storage=storage,
