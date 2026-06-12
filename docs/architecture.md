@@ -20,6 +20,9 @@ graph TB
     subgraph services ["Domain logic — src/services/"]
         VS[vision]
         QG[quality_gate]
+        BP[brief_parser]
+        PL[planner]
+        PW[prompt_writer]
         GL[generation_loop]
         FC[facecheck]
         PM[preset_matcher]
@@ -36,6 +39,9 @@ graph TB
         EB[EventBus]
         OS[ObjectStorage]
         SF[SlotFiller]
+        BPP[BriefParser]
+        SP[StepPlanner]
+        PWP[PromptWriter]
     end
 
     subgraph connectors ["Connectors — src/services/connectors/"]
@@ -88,12 +94,15 @@ graph TB
 
 ```
 POST /v1/faces  →  Vision (FaceAnalyzer port)  →  quality gate  →  FaceProfile → StateStore
-POST /v1/sessions  →  preset_matcher  →  background task spawned
+POST /v1/sessions  →  brief_parser (BriefAnalysis)  →  background task spawned
   background: FSM runs
+    parse_brief → ask node → resolve_constraints → plan_steps (planner)
     ask node    → interrupt → resume on POST /input
     approve node → interrupt → resume on POST /approve
     generate node → generation_loop
-      loop: prompt_builder → ImageGenerator → facecheck → keep-best → budget.charge
-      each iteration → EventBus.publish
+      outer: over plan.steps (chained — step N+1 edits step N's best)
+      inner: prompt_writer → prompt_builder.assemble → ImageGenerator → facecheck
+             → keep-best → budget.settle
+      each iteration → EventBus.publish; each step → step_started/step_result
 GET /events  →  SSE tail (EventBus)  →  client
 ```

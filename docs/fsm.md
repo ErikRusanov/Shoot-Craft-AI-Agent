@@ -48,9 +48,9 @@ stateDiagram-v2
 
 | Code | Trigger |
 |------|---------|
-| `INPUT_REJECTED` | Free-form input contained prompt injection |
-| `NO_PRESET` | No preset matched use_case + gender |
-| `SCENE_REJECTED` | Scene text failed sanitisation after max re-asks |
+| `INPUT_REJECTED` | Input photo cannot anchor the identity (gate below floor) |
+| `NO_PRESET` | No preset admits the request and no fallback ships |
+| `SCENE_REJECTED` | Composed body failed injection sanitisation after max re-asks |
 | `PLAN_REJECTED` | Caller sent `approved=false` |
 | `BUDGET_EXHAUSTED` | All paid slots used, no frame delivered |
 | `NO_DELIVERABLE` | Loop ended, best similarity below floor |

@@ -1,0 +1,72 @@
+# DEMO preset — MIT, ships in the public repo to exercise the LOCKED-attribute
+# policy (the rigid mode). This is NOT the curated library (the moat), and it
+# makes NO document-compliance claim: AI-edited photos are rejected for real
+# passports/visas/IDs. It only demonstrates how a preset pins non-negotiable
+# attributes that win over a user's delta, with the conflict surfaced, never
+# silently overridden.
+id: demo_passport
+version: 1.0.0
+
+applies_to:
+  use_case: [passport, id_photo, document]
+
+# Target-driven, but with locked attributes the writer must not fight.
+mode: generate
+
+style_notes: >-
+  A rigid, document-style portrait: plain, frontal, evenly lit, unstylized.
+
+identity_instruction: >-
+  Preserve the exact facial identity of the person in the reference photo: the
+  same face geometry, eyes, nose, lips, jawline, skin tone, and any moles or
+  scars. Do not beautify, slim, age, or restyle the face. Reproduce a faithful,
+  recognizable likeness of the same individual.
+
+# The locked attributes are NOT placeholders here — they are rendered
+# deterministically by the builder as a non-negotiable clause, so they cannot be
+# weakened by the body. Only the asked purpose fills a slot in the structure.
+prompt_structure: >-
+  Formal document-style portrait of the person for {purpose}: head-and-shoulders,
+  a neutral expression with the mouth closed and eyes open, looking straight into
+  the camera. Photorealistic, natural skin texture, sharp focus, neutral white
+  balance.
+
+negative_prompt: >-
+  smiling with teeth, tilted or turned head, profile or three-quarter angle, hat,
+  sunglasses, props, colored or gradient background, harsh shadows, cartoon,
+  illustration, 3d render, plastic or waxy skin, beauty filter, distorted face,
+  extra fingers, watermark, text, logo, low resolution, blurry, different person.
+
+slots:
+  purpose:
+    required: true
+    ask: true
+    default: "an internal document photo"
+    enum:
+      - "an internal document photo"
+      - "a profile or directory photo"
+  # Locked: a deterministic, non-negotiable value. A user delta ("green
+  # background") does not change it — the lock wins and the conflict is surfaced.
+  background:
+    required: false
+    ask: false
+    policy: locked
+    default: "a plain, uniform pure white background"
+  pose:
+    required: false
+    ask: false
+    policy: locked
+    default: "squared to the camera, fully frontal, head not tilted or turned"
+
+generation:
+  # Lowest temperature: a rigid, consistent, unstylized portrait.
+  temperature: 0.30
+  aspect_ratio: "3:4"
+  face_media_resolution: high
+
+thresholds:
+  similarity_threshold: 0.62  # placeholder; calibrate on real pipeline output
+  identity_floor: 0.55  # placeholder; floor a touch higher — recognizability matters
+  K_max_retries: 4
+
+anchor_examples: []

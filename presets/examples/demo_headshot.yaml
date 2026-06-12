@@ -7,6 +7,13 @@ version: 1.0.0
 applies_to:
   use_case: [headshot, resume]
 
+# Target-driven: the writer composes a fresh professional headshot.
+mode: generate
+
+style_notes: >-
+  A polished but natural professional headshot — confident, approachable, no
+  heavy retouching.
+
 identity_instruction: >-
   Preserve the exact facial identity of the person in the reference photo: the
   same face geometry, eyes, nose, lips, jawline, skin tone, and any moles or

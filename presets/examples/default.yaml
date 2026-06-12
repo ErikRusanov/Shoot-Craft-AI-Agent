@@ -19,6 +19,13 @@ applies_to:
   # The reserved fallback token — see the header.
   use_case: [default]
 
+# Delta-driven: start from the user's photo and apply only the named changes.
+# This is the base edit-mode preset the brief parser falls through to.
+mode: edit
+
+style_notes: >-
+  A faithful edit — apply only what the user asked, change nothing else.
+
 identity_instruction: >-
   Reproduce the exact person from the reference photo. The face must be IDENTICAL:
   the same geometry and bone structure, eyes, eyebrows, nose, lips, jawline, skin

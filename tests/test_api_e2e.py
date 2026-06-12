@@ -359,5 +359,5 @@ async def test_health_and_readiness(server: tuple[str, Container]) -> None:
         ready = resp.json()
         assert ready["status"] == "ready"
         assert ready["redis"] == {"mode": "in-memory"}
-        assert ready["presets"]["count"] == 3
+        assert ready["presets"]["count"] == 4
         assert ready["presets"]["library_version"] == "examples"

@@ -55,13 +55,19 @@ Layered; dependencies point inward toward `protocols`/`schemas`:
 
 - `schemas/` — all pydantic models and the **only** home of the contract: API
   in/out (`contract.py`), internal state (`state.py`: FaceProfile, SessionState,
-  Iteration), SSE events (`events.py`), presets (`presets.py`), enums
-  (`enums.py`). Every model carries a `schema_v` field for versioning.
+  Iteration, EditStep), the brief reading (`brief.py`: BriefAnalysis, Change),
+  SSE events (`events.py`), presets (`presets.py`), enums (`enums.py`). Every
+  model carries a `schema_v` field for versioning.
 - `protocols/` — ports (Protocol interfaces), no implementation: `Embedder`,
-  `ImageGenerator`, `StateStore`, `ObjectStorage`, `EventBus`.
+  `ImageGenerator`, `StateStore`, `ObjectStorage`, `EventBus`, `BriefParser`,
+  `StepPlanner`, `PromptWriter`, `SlotFiller`.
 - `services/` — domain logic. Depends **only** on `protocols` and `schemas`,
   never on concrete connectors: vision, quality_gate, preset_matcher,
-  prompt_builder, facecheck, generation_loop, budget, idempotency, telemetry.
+  brief_parser, planner, prompt_writer, prompt_builder, slot_filler, facecheck,
+  generation_loop, estimator, budget, idempotency, telemetry. The brief-driven
+  flow is **parse → resolve constraints → plan steps → chained generation**: an
+  LLM stage with a deterministic no-LLM fallback at each step (`brief_parser`,
+  `planner`, `prompt_writer`), so the pipeline never fails because an LLM did.
 - `services/connectors/` — adapters implementing the ports: `redis_store` +
   `memory_store` (fallback), `redis_event_bus`, `openrouter`,
   `insightface_embedder`, `s3_storage` + `local_storage` (dev fallback).
@@ -92,8 +98,18 @@ DI flow: `api/deps.py` binds connectors behind ports → graph nodes call servic
 - **Budget** (`budget_limit`) is the number of paid generations; atomic Lua
   increment. All mutations are **idempotent** by `idem_key`. Results are
   **keep-best**.
-- **Prompt adaptation** only fills slots and a short addendum. The identity block
-  and structure are **frozen** — the LLM never edits them, including on retry.
+- **Prompt adaptation (writer-driven).** An LLM **prompt writer**
+  (`services/prompt_writer.py`, behind the `PromptWriter` port) composes the
+  scene/edit **body** per situation — mode (edit/generate), the step's
+  instruction, the preserve-list, the locked values (informational), the preset's
+  `style_notes`, the photo metrics — and **revises** it on retry against the prior
+  attempt's face-check. The writer produces the body **only**; it never sees
+  `identity_instruction`, `negative_prompt` or the locked attributes as editable
+  text. `services/prompt_builder.assemble_prompt` wraps the body deterministically
+  — `identity (frozen) + body (sanitized) + locks (deterministic) + exclusions
+  (frozen)` — so a lock wins over the body and the frozen blocks are untouchable.
+  Every writer node degrades to the no-LLM fallback (the filled `prompt_structure`
+  template + the fixed identity-emphasis line) when the writer is unavailable.
 
 ## Presets
 
@@ -111,16 +127,26 @@ loads into memory at startup, indexes, and holds it immutably:
 - `PRESET_SOURCE=path` + `PRESET_LIBRARY_PATH=…` (dev/custom) → read that dir
 - default (no config) → `presets/examples/` from this repo
 
+**Preset schema v4 (writer pipeline).** A preset declares `mode`
+(`generate`/`edit`/`both`), free-text `style_notes` for the writer, and per-slot
+`policy` (`locked` = a deterministic non-negotiable attribute that wins over a
+user delta, the conflict surfaced; `default` = the preset default, a user delta
+wins). `prompt_structure` is **demoted** to the no-LLM fallback template — the
+writer composes the body as the primary path; the builder assembles the frozen
+blocks and locks around it.
+
 **Fallback convention (needs `photocore-presets >= 0.3.0`).** The id `default`
-is the reserved fallback preset; its only `applies_to.use_case` token is
-`default`, reserved and never used elsewhere. `match()` excludes that token, so
-the fallback is *never* keyword-matched — `resolve()` returns it only when no
-curated preset admits the request. Its single `ask:true` slot (`scene`) is the
-one **free-form** (no-enum) slot: the user's own words fill `{scene}`, and
-`prompt_builder` sanitizes that text (scene description only — attempts to edit
-the face/identity or override the frozen blocks are rejected, the caller
-re-asks). `PRESET_MIN_LIBRARY_VERSION` (default `0.3.0`) is enforced in
-`package` mode at startup so a deploy can't silently lose the fallback.
+is the reserved fallback preset and the base **edit-mode** preset; its only
+`applies_to.use_case` token is `default`, reserved and never used elsewhere.
+`match()` excludes that token, so the fallback is *never* keyword-matched —
+`resolve()` returns it only when no curated preset admits the request (i.e. for
+an edit brief with no curated use-case). Its single `ask:true` slot (`scene`) is
+the one **free-form** (no-enum) slot, fed from the brief; `assemble_prompt`
+sanitizes the composed body (scene description only — attempts to edit the
+face/identity or override the frozen blocks are rejected, the caller re-asks).
+`PRESET_MIN_LIBRARY_VERSION` (default `0.5.0` — preset schema v4) is enforced in
+`package` mode at startup so a deploy can't silently lose the fallback or run a
+stale contract.
 
 `SessionState` must record `preset_id`, `preset_version` **and** `library_version`
 (the package version) — otherwise a result can't be reproduced after a library

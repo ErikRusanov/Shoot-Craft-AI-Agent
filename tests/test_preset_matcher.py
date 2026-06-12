@@ -114,8 +114,12 @@ def _presets(library: PresetLibrary) -> list[Preset]:
 def test_placeholders_match_slots(library: PresetLibrary) -> None:
     for preset in _presets(library):
         slots = set(preset.slots)
+        # Locked attributes are rendered deterministically by the builder, never
+        # as a template placeholder the body could weaken; every other slot is a
+        # placeholder, and no placeholder lacks a slot.
+        locked = {name for name, slot in preset.slots.items() if slot.policy == "locked"}
         used = set(_PLACEHOLDER.findall(preset.prompt_structure))
-        assert used == slots, f"{preset.id}: placeholders {used} != slots {slots}"
+        assert used == slots - locked, f"{preset.id}: placeholders {used} != {slots - locked}"
 
 
 def test_single_ask_slot(library: PresetLibrary) -> None:

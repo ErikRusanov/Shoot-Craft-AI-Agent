@@ -14,9 +14,10 @@ import httpx
 import pytest
 
 from config import Settings
+from graph.nodes import _locked_conflicts
 from protocols import BudgetMeter
 from protocols.prompt_writer import WriteRequest, WriterFeedback
-from schemas import Preset
+from schemas import BriefAnalysis, Change, Preset
 from services.budget import BudgetService
 from services.connectors import InMemoryStateStore, OpenRouterPromptWriter
 from services.preset_matcher import PresetLibrary, load_library
@@ -42,6 +43,13 @@ def avatar(library: PresetLibrary) -> Preset:
 @pytest.fixture(scope="module")
 def fallback(library: PresetLibrary) -> Preset:
     preset = library.get("default")
+    assert preset is not None
+    return preset
+
+
+@pytest.fixture(scope="module")
+def passport(library: PresetLibrary) -> Preset:
+    preset = library.get("demo_passport")
     assert preset is not None
     return preset
 
@@ -140,6 +148,36 @@ def test_assemble_passes_deterministic_default_body(fallback: Preset) -> None:
     body = fill_template(fallback, {**_defaults(fallback), "scene": "a sunny beach"})
     built = assemble_prompt(fallback, body)
     assert "a sunny beach" in built.text
+
+
+# --- locked attributes (the rigid passport preset) ---
+
+
+def test_passport_declares_locked_slots(passport: Preset) -> None:
+    assert passport.mode == "generate"
+    assert passport.slots["background"].policy == "locked"
+    assert passport.slots["pose"].policy == "locked"
+
+
+def test_locked_conflict_is_surfaced(passport: Preset) -> None:
+    analysis = BriefAnalysis(
+        mode="generate",
+        use_case="passport",
+        changes=[Change(target="background", instruction="make it bright green")],
+    )
+    conflicts = _locked_conflicts(passport, analysis)
+    assert len(conflicts) == 1
+    assert "background" in conflicts[0]
+
+
+def test_locked_value_wins_in_the_assembled_prompt(passport: Preset) -> None:
+    # The lock clause renders the fixed white background after the body, so a
+    # body asking for green could never override it.
+    locks = {"background": "a plain, uniform pure white background"}
+    built = assemble_prompt(passport, "A portrait against a bright green wall.", locks=locks)
+    body_at = built.text.index("bright green")
+    lock_at = built.text.index("a plain, uniform pure white background")
+    assert body_at < lock_at  # the lock has the last word
 
 
 # --- LLM connector ---
