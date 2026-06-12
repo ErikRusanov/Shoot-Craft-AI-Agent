@@ -13,7 +13,7 @@
 # in the reference. That keeps "do not change the photo, make the background blue"
 # an edit, not a fresh generation that drifts the face.
 id: default
-version: 1.0.0
+version: 1.1.0
 
 applies_to:
   # The reserved fallback token — see the header.
@@ -24,14 +24,20 @@ applies_to:
 mode: edit
 
 style_notes: >-
-  A faithful edit — apply only what the user asked, change nothing else.
+  A faithful edit — describe only the delta and its integration into the photo
+  (light direction, shadows, grain); never re-describe the person.
 
+# The pixel-for-pixel lock wording deliberately repeats the core's edit-mode
+# lock block: repetition of the lock rhetoric is what holds the face through a
+# chained edit.
 identity_instruction: >-
-  Reproduce the exact person from the reference photo. The face must be IDENTICAL:
-  the same geometry and bone structure, eyes, eyebrows, nose, lips, jawline, skin
-  tone and complexion, and any moles, freckles or scars. Do not beautify, slim,
-  age, de-age, restyle, or otherwise alter the face. This is a photo edit of a
-  real person — never a new portrait merely resembling them.
+  Reproduce the exact person from the reference photo. The person is LOCKED and
+  must be copied pixel-for-pixel from the original: the entire face, every facial
+  feature, expression, eyes, nose, mouth, jaw, beard or stubble, hair, skin
+  texture and skin tone, the body, the pose and the hands. Do NOT regenerate,
+  repaint, smooth, retouch, denoise or beautify any part of the person. Keep the
+  face at the exact original sharpness, grain and raw skin texture. This is a
+  photo edit of a real person — never a new portrait merely resembling them.
 
 # {scene} carries the user's own change request, verbatim. The framing is an
 # edit: apply only that change, keep everything else as the reference shows it.
@@ -43,9 +49,11 @@ prompt_structure: >-
   texture and true-to-life colors; add no stylization beyond the requested change.
 
 negative_prompt: >-
-  cartoon, illustration, 3d render, plastic or waxy skin, beauty filter,
-  distorted face, extra fingers, duplicated person, watermark, text, logo, low
-  resolution, blurry, different person.
+  cartoon, illustration, 3d render, plastic or waxy skin, over-smoothed skin,
+  beauty filter, beauty retouching, distorted face, changed facial expression,
+  changed pose, repositioned or redrawn hands, shifted framing or crop, extra
+  fingers, duplicated person, watermark, text, logo, low resolution, blurry,
+  different person.
 
 slots:
   # The single clarifying question — FREE-FORM (no enum): the user describes the

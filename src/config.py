@@ -132,12 +132,12 @@ class Settings(BaseSettings):
     # Runtime expectation on the curated library in 'package' mode. The reserved
     # `default` fallback landed in 0.3.0; 0.4.0 dropped applies_to.gender (preset
     # schema_v 3); 0.5.0 brought preset schema_v 4 (mode, style_notes, slot
-    # policy) for the brief-driven writer pipeline. A prod deploy that pulls an
+    # policy) for the brief-driven writer pipeline; 0.7.0 strengthened the edit
+    # preset's frozen blocks with the pixel-for-pixel lock language the core's
+    # edit-mode lock-block assembly pairs with. A prod deploy that pulls an
     # older package fails fast at startup rather than running a stale contract.
-    # New schema_v 4 fields are optional, so an older 0.4.x library still loads;
-    # 0.5.0 marks the library that actually uses edit mode and locked attributes.
     # Only enforced for 'package' mode.
-    preset_min_library_version: str = "0.5.0"
+    preset_min_library_version: str = "0.7.0"
 
     # --- Generation loop / budget safety ---
     # budget_limit is supplied per session by the business service; this is only a

@@ -205,11 +205,13 @@ STEP2_ITEMS = edit_lock_items(
 )
 
 GOLDEN_EDIT_PROMPT = (
-    "Reproduce the exact person from the reference photo. The face must be IDENTICAL: "
-    "the same geometry and bone structure, eyes, eyebrows, nose, lips, jawline, skin "
-    "tone and complexion, and any moles, freckles or scars. Do not beautify, slim, "
-    "age, de-age, restyle, or otherwise alter the face. This is a photo edit of a "
-    "real person — never a new portrait merely resembling them."
+    "Reproduce the exact person from the reference photo. The person is LOCKED and "
+    "must be copied pixel-for-pixel from the original: the entire face, every facial "
+    "feature, expression, eyes, nose, mouth, jaw, beard or stubble, hair, skin "
+    "texture and skin tone, the body, the pose and the hands. Do NOT regenerate, "
+    "repaint, smooth, retouch, denoise or beautify any part of the person. Keep the "
+    "face at the exact original sharpness, grain and raw skin texture. This is a "
+    "photo edit of a real person — never a new portrait merely resembling them."
     "\n\n"
     "LOCKED — the following must be copied exactly from the provided image, unchanged: "
     + GENERIC_LOCK
@@ -237,9 +239,11 @@ GOLDEN_EDIT_PROMPT = (
     "meets the scene, match the existing light direction and keep shadows, "
     "reflections and grain consistent with the rest of the photo."
     "\n\n"
-    "Strictly avoid: cartoon, illustration, 3d render, plastic or waxy skin, beauty "
-    "filter, distorted face, extra fingers, duplicated person, watermark, text, logo, "
-    "low resolution, blurry, different person."
+    "Strictly avoid: cartoon, illustration, 3d render, plastic or waxy skin, "
+    "over-smoothed skin, beauty filter, beauty retouching, distorted face, changed "
+    "facial expression, changed pose, repositioned or redrawn hands, shifted framing "
+    "or crop, extra fingers, duplicated person, watermark, text, logo, low "
+    "resolution, blurry, different person."
 )
 
 
