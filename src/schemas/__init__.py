@@ -47,6 +47,7 @@ from schemas.events import (
     StepResultEvent,
     StepStartedEvent,
 )
+from schemas.inventory import PhotoInventory
 from schemas.presets import (
     AppliesTo,
     Composition,
@@ -103,6 +104,7 @@ __all__ = [
     "NeedInputEvent",
     "PaidCallKind",
     "PaidCallRecord",
+    "PhotoInventory",
     "Plan",
     "PlanEvent",
     "Preset",

@@ -26,16 +26,12 @@ from typing import Any
 
 from protocols.generator import GeneratedImage, GenerationRefusedError
 from schemas import Generation
+from services.connectors.image_parts import image_part
 from services.connectors.openrouter_client import OpenRouterClient, parse_usage
 
 # OpenRouter's per-part detail vocabulary; the preset's face_media_resolution
 # must be one of these or the request is a config bug, failed before any spend.
 _DETAIL_LEVELS = frozenset({"auto", "low", "high"})
-
-_MAGIC_MIME: tuple[tuple[bytes, str], ...] = (
-    (b"\x89PNG\r\n\x1a\n", "image/png"),
-    (b"\xff\xd8\xff", "image/jpeg"),
-)
 
 
 class NoImageGeneratedError(GenerationRefusedError):
@@ -46,26 +42,6 @@ class NoImageGeneratedError(GenerationRefusedError):
     A :class:`~protocols.generator.GenerationRefusedError`, so it carries the
     billed ``usage`` and the loop settles its spend rather than refunding.
     """
-
-
-def _sniff_mime(image: bytes) -> str:
-    if image[:4] == b"RIFF" and image[8:12] == b"WEBP":
-        return "image/webp"
-    for magic, mime in _MAGIC_MIME:
-        if image[: len(magic)] == magic:
-            return mime
-    # The pipeline encodes references as JPEG (utils.images.encode_jpeg);
-    # unrecognized bytes default to that and the upstream rejects true garbage.
-    return "image/jpeg"
-
-
-def _image_part(image: bytes, *, detail: str | None = None) -> dict[str, Any]:
-    image_url: dict[str, Any] = {
-        "url": f"data:{_sniff_mime(image)};base64,{base64.b64encode(image).decode('ascii')}"
-    }
-    if detail is not None:
-        image_url["detail"] = detail
-    return {"type": "image_url", "image_url": image_url}
 
 
 def _extract_image(body: dict[str, Any]) -> bytes:
@@ -109,9 +85,9 @@ class OpenRouterImageGenerator:
             )
 
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-        content += [_image_part(ref) for ref in reference_images]
+        content += [image_part(ref) for ref in reference_images]
         if face_crop is not None:
-            content.append(_image_part(face_crop, detail=params.face_media_resolution))
+            content.append(image_part(face_crop, detail=params.face_media_resolution))
 
         body = await self._client.chat_completion(
             {

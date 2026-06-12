@@ -13,6 +13,7 @@ from protocols.embedder import Embedder
 from protocols.event_bus import EventBus, StreamedEvent
 from protocols.face_analyzer import DetectedFace, FaceAnalyzer
 from protocols.generator import GeneratedImage, GenerationRefusedError, ImageGenerator
+from protocols.inventory import InventoryExtractor, InventoryResult
 from protocols.object_storage import ObjectStorage
 from protocols.planner import PlanResult, StepPlanner
 from protocols.prompt_writer import (
@@ -35,6 +36,8 @@ __all__ = [
     "GeneratedImage",
     "GenerationRefusedError",
     "ImageGenerator",
+    "InventoryExtractor",
+    "InventoryResult",
     "ObjectStorage",
     "ParseResult",
     "PlanResult",

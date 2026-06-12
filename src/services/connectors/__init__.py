@@ -19,6 +19,7 @@ from services.connectors.openrouter_generator import (
     NoImageGeneratedError,
     OpenRouterImageGenerator,
 )
+from services.connectors.openrouter_inventory import OpenRouterInventoryExtractor
 from services.connectors.openrouter_planner import OpenRouterStepPlanner
 from services.connectors.openrouter_prompt_writer import OpenRouterPromptWriter
 from services.connectors.openrouter_slot_filler import OpenRouterSlotFiller
@@ -38,6 +39,7 @@ __all__ = [
     "OpenRouterBriefParser",
     "OpenRouterClient",
     "OpenRouterImageGenerator",
+    "OpenRouterInventoryExtractor",
     "OpenRouterPromptWriter",
     "OpenRouterSlotFiller",
     "OpenRouterStepPlanner",

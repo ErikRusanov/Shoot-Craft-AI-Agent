@@ -65,10 +65,13 @@ class PricingTable(BaseModel):
     # Reservations are padded so the real cost almost never exceeds them.
     reserve_safety_factor: Decimal = Decimal("1.15")
     # Flat (already padded) reservation for the cheap auxiliary LLM calls.
+    # INVENTORY carries one input image (~1120 tokens) plus a few hundred output
+    # tokens on a cheap vision model, so its pad sits above the text-only calls.
     flat_estimates: dict[PaidCallKind, Decimal] = Field(
         default_factory=lambda: {
             PaidCallKind.SLOT_FILL: Decimal("0.002"),
             PaidCallKind.CLASSIFY: Decimal("0.002"),
+            PaidCallKind.INVENTORY: Decimal("0.005"),
         }
     )
 

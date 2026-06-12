@@ -67,15 +67,17 @@ class RiskLevel(StrEnum):
 class PaidCallKind(StrEnum):
     """Every upstream call that costs money, so the budget meter can price it.
 
-    One pay-as-you-go limit covers all three: the generation itself, the cheap
-    LLM that fills styling slots, and the cheap LLM that classifies the use case
-    from free text. Naming them lets pricing carry a per-kind reserve estimate
-    and the session record attribute spend to the right line.
+    One pay-as-you-go limit covers them all: the generation itself, the cheap
+    LLM that fills styling slots, the cheap LLM that classifies/parses the brief,
+    and the VLM that catalogues the reference photo. Naming them lets pricing
+    carry a per-kind reserve estimate and the session record attribute spend to
+    the right line.
     """
 
     GENERATION = "generation"
     SLOT_FILL = "slot_fill"
     CLASSIFY = "classify"
+    INVENTORY = "inventory"
 
 
 class GateReason(StrEnum):
