@@ -2,13 +2,15 @@
 
 ::
 
-    analyze → quality_gate → parse_brief → ask ⇄ resolve_constraints
-        → plan_steps → approve → generate → done
+    analyze → quality_gate → parse_brief → extract_inventory → ask
+        ⇄ resolve_constraints → plan_steps → approve → generate → done
     (quality_gate / ask / resolve_constraints / approve can route to fail;
      generate routes to done or straight to END)
 
 ``parse_brief`` reads the brief into a BriefAnalysis (mode, preserve, changes,
 conflicts) — a budgeted LLM call with a deterministic fallback that never fails.
+``extract_inventory`` catalogues the reference photo for edit-mode prompts
+(once per photo, skipped for generate mode, degrades to nothing on failure).
 ``ask`` and ``approve`` pause on ``interrupt()``; ``resolve_constraints`` loops
 back to ``ask`` when a free-form answer is rejected. ``plan_steps`` decomposes
 the changes into the step plan the user approves. ``generate`` routes to ``done``
@@ -67,7 +69,8 @@ def build_graph(
     graph.add_conditional_edges(
         "quality_gate", _route_failure("parse_brief"), ["fail", "parse_brief"]
     )
-    graph.add_edge("parse_brief", "ask")
+    graph.add_edge("parse_brief", "extract_inventory")
+    graph.add_edge("extract_inventory", "ask")
     graph.add_conditional_edges(
         "ask", _route_failure("resolve_constraints"), ["fail", "resolve_constraints"]
     )

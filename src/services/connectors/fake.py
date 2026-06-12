@@ -24,7 +24,9 @@ from numpy.typing import NDArray
 from PIL import Image
 
 from protocols import DetectedFace, GeneratedImage
-from schemas import Generation
+from protocols.budget import BudgetMeter
+from protocols.inventory import InventoryResult
+from schemas import Generation, PhotoInventory
 from utils import images
 
 # buffalo_l's embedding dimension, so swapping fake ↔ real changes nothing else.
@@ -78,6 +80,30 @@ def _noise_jpeg(side: int = 64) -> bytes:
     buf = io.BytesIO()
     Image.fromarray(pixels, mode="RGB").save(buf, format="JPEG")
     return buf.getvalue()
+
+
+class FakeInventoryExtractor:
+    """A fixed, plausible inventory for any photo — free and instant.
+
+    Non-empty on purpose: the edit-mode lock block renders its concrete
+    enumeration path in dev runs instead of silently exercising only the
+    empty-inventory degradation.
+    """
+
+    async def extract(
+        self,
+        image: bytes,
+        *,
+        meter: BudgetMeter | None = None,
+    ) -> InventoryResult:
+        images.decode_rgb(image)  # keep the port's "must be an image" contract
+        return InventoryResult(
+            inventory=PhotoInventory(
+                pose="standing, facing the camera",
+                clothing="plain t-shirt",
+                background="a plain indoor room",
+            )
+        )
 
 
 class FakeImageGenerator:

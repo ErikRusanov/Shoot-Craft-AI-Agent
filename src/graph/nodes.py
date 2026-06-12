@@ -29,7 +29,15 @@ from typing import Any, Protocol
 from langgraph.types import interrupt
 
 from graph.state import GraphState
-from protocols import BriefParser, EventBus, ObjectStorage, SlotFiller, StateStore, StepPlanner
+from protocols import (
+    BriefParser,
+    EventBus,
+    InventoryExtractor,
+    ObjectStorage,
+    SlotFiller,
+    StateStore,
+    StepPlanner,
+)
 from schemas import (
     BriefAnalysis,
     CompositionChoice,
@@ -82,6 +90,7 @@ class GraphServices:
     library: PresetLibrary
     slot_filler: SlotFiller
     brief_parser: BriefParser
+    inventory: InventoryExtractor
     planner: StepPlanner
     generation_loop: GenerationLoop
     budget: BudgetService
@@ -254,6 +263,42 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         await _checkpoint(session)
         # Empty use_case (an edit) resolves to the fallback edit preset.
         return {"use_case": result.analysis.use_case or ""}
+
+    async def extract_inventory(state: GraphState) -> dict[str, Any]:
+        """Catalogue the reference photo for edit-mode prompts — once per photo.
+
+        Edit mode only: a generate-mode session never pays the VLM call. A
+        profile that already carries an inventory (an earlier session on the
+        same photo) is reused as-is. An empty extraction (the fallback) is not
+        stored, so a transient failure retries on the next session instead of
+        freezing emptiness for the profile's whole TTL.
+        """
+        session = await _session(state["session_key"])
+        analysis = session.brief_analysis
+        if analysis is None or analysis.mode != "edit":
+            return {}
+        face = await svc.store.get_face(state["face_key"])
+        if face is None or face.inventory is not None:
+            return {}
+        try:
+            photo = await svc.storage.get(photo_ref(state["face_key"]))
+        except KeyError:
+            return {}  # the generate node owns the missing-reference terminal
+        meter = svc.budget.meter(
+            state["session_key"],
+            limit=from_micro(state["budget_limit"]),
+            ttl_seconds=svc.session_ttl_seconds,
+        )
+        result = await svc.inventory.extract(photo, meter=meter)
+        if result.cost > 0:
+            session.llm_calls.append(
+                PaidCallRecord(kind=PaidCallKind.INVENTORY, cost=result.cost, usage=result.usage)
+            )
+            await _checkpoint(session)
+        if not result.inventory.is_empty():
+            face.inventory = result.inventory
+            await svc.store.put_face(face, ttl_seconds=svc.face_ttl_seconds)
+        return {}
 
     async def ask(state: GraphState) -> dict[str, Any]:
         """The single clarifying question — the preset's ``ask:true`` slot."""
@@ -509,6 +554,7 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         "analyze": analyze,
         "quality_gate": quality_gate,
         "parse_brief": parse_brief,
+        "extract_inventory": extract_inventory,
         "ask": ask,
         "resolve_constraints": resolve_constraints,
         "plan_steps": plan_steps,

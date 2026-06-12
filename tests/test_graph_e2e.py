@@ -205,6 +205,11 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
     assert await container.storage.get(session.best_result.result_ref)
     await assert_generations_charged(container, "s1", 1)
 
+    # A generate-mode session never pays the inventory call.
+    face = await container.store.get_face("face-1")
+    assert face is not None
+    assert face.inventory is None
+
 
 async def test_below_floor_photo_fails_before_asking(server: tuple[str, Container]) -> None:
     """A photo under the resolution floor ends the session at the gate."""
@@ -362,4 +367,34 @@ async def test_freeform_injection_is_reasked_then_accepted(tmp_path: Any) -> Non
     assert session.preset_id == "default"
     # The poisoned text never reached the session; the clean scene did.
     assert session.slots["scene"] == "reading a book in a sunny park"
+    await container.aclose()
+
+
+async def test_edit_session_extracts_inventory_onto_the_profile(tmp_path: Any) -> None:
+    """An edit-mode brief triggers the one-per-photo inventory extraction; the
+    catalogue lands on the face profile and survives for reuse."""
+    container = build_container(make_settings(tmp_path, None))
+    await container.astart()
+    await container.storage.put(photo_ref("face-edit"), noise_png())
+    config: RunnableConfig = {"configurable": {"thread_id": "s-inv"}}
+    initial = initial_state(
+        session_key="s-inv",
+        face_key="face-edit",
+        use_case="",  # no caller token + no curated overlap → an edit brief
+        brief="replace the wall behind me with a deep blue one",
+        budget_limit=to_micro(Decimal("2")),
+    )
+
+    async with asyncio.timeout(E2E_TIMEOUT):
+        # The brief answers the fallback's free-form slot, so the first pause
+        # is already the approval gate.
+        paused = await container.graph.ainvoke(initial, config=config)
+        assert paused["__interrupt__"][0].value["slot"] == "approve"
+        final = await container.graph.ainvoke(Command(resume={"approved": True}), config=config)
+        assert final["delivered"] is True
+
+    face = await container.store.get_face("face-edit")
+    assert face is not None
+    assert face.inventory is not None
+    assert face.inventory.pose == "standing, facing the camera"
     await container.aclose()

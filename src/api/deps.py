@@ -48,6 +48,7 @@ from protocols import (
     EventBus,
     FaceAnalyzer,
     ImageGenerator,
+    InventoryExtractor,
     ObjectStorage,
     PromptWriter,
     SlotFiller,
@@ -60,6 +61,7 @@ from services.budget import BudgetService
 from services.connectors import (
     FakeFaceEngine,
     FakeImageGenerator,
+    FakeInventoryExtractor,
     InMemoryEventBus,
     InMemoryStateStore,
     InsightFaceEmbedder,
@@ -67,6 +69,7 @@ from services.connectors import (
     OpenRouterBriefParser,
     OpenRouterClient,
     OpenRouterImageGenerator,
+    OpenRouterInventoryExtractor,
     OpenRouterPromptWriter,
     OpenRouterSlotFiller,
     OpenRouterStepPlanner,
@@ -419,10 +422,12 @@ def build_container(settings: Settings) -> Container:
     writer: PromptWriter
     analyzer: FaceAnalyzer
     embedder: Embedder
+    inventory: InventoryExtractor
     if settings.fake_connectors:
         generator = FakeImageGenerator()
         slot_filler = DefaultSlotFiller()
         brief_parser = DeterministicBriefParser()
+        inventory = FakeInventoryExtractor()
         planner = DeterministicStepPlanner()
         writer = DeterministicPromptWriter()
         face_engine = FakeFaceEngine()
@@ -437,6 +442,7 @@ def build_container(settings: Settings) -> Container:
         generator = OpenRouterImageGenerator(openrouter, model=settings.generation_model)
         slot_filler = OpenRouterSlotFiller(openrouter, model=settings.slot_filler_model)
         brief_parser = OpenRouterBriefParser(openrouter, model=settings.brief_parser_model)
+        inventory = OpenRouterInventoryExtractor(openrouter, model=settings.inventory_model)
         planner = OpenRouterStepPlanner(openrouter, model=settings.planner_model)
         writer = OpenRouterPromptWriter(openrouter, model=settings.prompt_writer_model)
         # One InsightFace pack serves both ports from a single inference pass.
@@ -463,6 +469,7 @@ def build_container(settings: Settings) -> Container:
         library=library,
         slot_filler=slot_filler,
         brief_parser=brief_parser,
+        inventory=inventory,
         planner=planner,
         generation_loop=GenerationLoop(
             store=store,

@@ -24,6 +24,7 @@ from pydantic import Field
 from schemas.base import SchemaModel, StrictModel
 from schemas.brief import BriefAnalysis
 from schemas.enums import FsmState, GateReason, PaidCallKind, RiskLevel, Verdict
+from schemas.inventory import PhotoInventory
 from schemas.presets import Thresholds
 
 # Lifecycle of one plan step along the chain: pending → completed, or skipped
@@ -83,7 +84,7 @@ class FaceProfile(SchemaModel):
     object-storage ref of the source photo.
     """
 
-    schema_v: int = 2
+    schema_v: int = 3
     face_key: str
     # Identity vector — biometric, never logged. Empty when no face was detected
     # (the gate then says NO_FACE and the profile is unusable for generation).
@@ -95,6 +96,10 @@ class FaceProfile(SchemaModel):
     # gender drives anything here. Preset matching is use_case only.
     convergence: ConvergenceStats = Field(default_factory=ConvergenceStats)
     photo_ref: str  # object-storage key of the input photo
+    # What is visible in the reference photo, in words (v3) — extracted once per
+    # photo for edit-mode prompts, reused across sessions on the same profile.
+    # Appearance text, never logged; None until an edit session extracts it.
+    inventory: PhotoInventory | None = None
 
 
 class ProviderUsage(StrictModel):

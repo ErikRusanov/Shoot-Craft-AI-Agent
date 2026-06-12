@@ -9,7 +9,11 @@ runtime failover between backends.
 
 from __future__ import annotations
 
-from services.connectors.fake import FakeFaceEngine, FakeImageGenerator
+from services.connectors.fake import (
+    FakeFaceEngine,
+    FakeImageGenerator,
+    FakeInventoryExtractor,
+)
 from services.connectors.insightface_embedder import InsightFaceEmbedder
 from services.connectors.local_storage import LocalObjectStorage
 from services.connectors.memory_store import InMemoryEventBus, InMemoryStateStore
@@ -31,6 +35,7 @@ from services.connectors.throttle import ThrottledImageGenerator
 __all__ = [
     "FakeFaceEngine",
     "FakeImageGenerator",
+    "FakeInventoryExtractor",
     "InMemoryEventBus",
     "InMemoryStateStore",
     "InsightFaceEmbedder",
