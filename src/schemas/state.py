@@ -17,12 +17,18 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import Field
 
 from schemas.base import SchemaModel, StrictModel
+from schemas.brief import BriefAnalysis
 from schemas.enums import FsmState, GateReason, PaidCallKind, RiskLevel, Verdict
 from schemas.presets import Thresholds
+
+# Lifecycle of one plan step along the chain: pending → completed, or skipped
+# when the planner trimmed it to fit the budget (recorded, never silent).
+StepStatus = Literal["pending", "completed", "skipped"]
 
 
 class FrameMetrics(StrictModel):
@@ -129,8 +135,11 @@ class Iteration(SchemaModel):
     ``prompt_hash`` ties the attempt to the exact prompt for reproducibility.
     """
 
-    schema_v: int = 2
+    schema_v: int = 3
     n: int
+    # Which plan step this attempt belongs to (1 for a single-step / generate
+    # run). The chain reference for step N+1 is step N's kept-best result.
+    step_n: int = 1
     prompt_hash: str
     # The full prompt text, kept so a surprising result can be debugged from the
     # snapshot rather than blind (the hash alone proves reproducibility but says
@@ -162,6 +171,24 @@ class CompositionChoice(StrictModel):
     preview_asset: str | None = None
 
 
+class EditStep(StrictModel):
+    """One ordered step of an edit/generation plan.
+
+    A complex brief decomposes into steps the generator chains: each step's
+    kept-best result feeds the next. ``targets`` are the :class:`~schemas.brief.Change`
+    targets this step applies (compatible deltas merge into one step). ``status``
+    tracks chain progress; ``result_ref`` is the object-storage key of the step's
+    kept-best frame once it completes.
+    """
+
+    n: int
+    title: str
+    instruction: str
+    targets: list[str] = Field(default_factory=list)
+    status: StepStatus = "pending"
+    result_ref: str | None = None
+
+
 class Plan(StrictModel):
     """What the session intends to generate, shown to the user for approval."""
 
@@ -169,6 +196,9 @@ class Plan(StrictModel):
     compositions: list[CompositionChoice] = Field(default_factory=list)
     selected_composition: str | None = None
     planned_generations: int
+    # The ordered edit/generation steps the user approves. Empty for a legacy
+    # single-shot plan; a generate-mode plan carries exactly one step.
+    steps: list[EditStep] = Field(default_factory=list)
 
 
 class CostEstimate(StrictModel):
@@ -214,13 +244,16 @@ class SessionState(SchemaModel):
     settles against it, and :meth:`cost_spent` totals what was actually billed.
     """
 
-    schema_v: int = 2
+    schema_v: int = 3
     session_key: str
     face_key: str
     fsm_state: FsmState = FsmState.CREATED
     preset_id: str | None = None
     preset_version: str | None = None
     library_version: str | None = None
+    # The structured reading of the brief (mode, preserve-list, changes,
+    # conflicts) — drives resolution, the step plan and the writer.
+    brief_analysis: BriefAnalysis | None = None
     slots: dict[str, str] = Field(default_factory=dict)  # resolved slot values
     plan: Plan | None = None
     cost_estimate: CostEstimate | None = None

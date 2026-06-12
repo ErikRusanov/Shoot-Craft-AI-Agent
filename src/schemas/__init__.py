@@ -9,6 +9,7 @@ public surface.
 from __future__ import annotations
 
 from schemas.base import SchemaModel, StrictModel
+from schemas.brief import BriefAnalysis, Change
 from schemas.contract import (
     ApproveRequest,
     IngestPhotoRequest,
@@ -58,6 +59,7 @@ from schemas.state import (
     CompositionChoice,
     ConvergenceStats,
     CostEstimate,
+    EditStep,
     FaceProfile,
     FrameMetrics,
     Iteration,
@@ -71,6 +73,8 @@ __all__ = [
     "AppliesTo",
     "ApproveRequest",
     "BestResult",
+    "BriefAnalysis",
+    "Change",
     "Composition",
     "CompositionChoice",
     "ConvergenceProfile",
@@ -78,6 +82,7 @@ __all__ = [
     "CostEstimate",
     "CostEvent",
     "DoneEvent",
+    "EditStep",
     "Event",
     "EventAdapter",
     "FaceProfile",

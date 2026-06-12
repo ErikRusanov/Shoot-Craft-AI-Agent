@@ -15,6 +15,7 @@ itself (this shape), independently of any individual preset's ``version``.
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -33,6 +34,10 @@ class Slot(_Strict):
     ask: bool = False
     default: object | None = None
     enum: list[object] | None = None
+    # locked = a deterministic, non-negotiable preset attribute (passport white
+    # background, frontal pose): it wins over a user delta and the conflict is
+    # surfaced to the user. default = the preset's default, a user delta wins.
+    policy: Literal["locked", "default"] = "default"
 
 
 class AppliesTo(_Strict):
@@ -90,13 +95,24 @@ class Preset(_Strict):
     # Contract version of this shape; absent in YAML → defaults. Bump only on a
     # breaking change to the preset schema itself, not on a library content edit.
     # v2: dropped applies_to.age. v3: dropped applies_to.gender — the face comes
-    # from the reference, so matching is use_case only.
-    schema_v: int = 3
+    # from the reference, so matching is use_case only. v4: added `mode`,
+    # `style_notes` and slot `policy` for the brief-driven writer pipeline;
+    # `prompt_structure` demoted to the no-LLM fallback template.
+    schema_v: int = 4
     id: str
     version: str
     applies_to: AppliesTo
+    # generate = target-driven template; edit = delta-driven on the user's photo;
+    # both = usable either way. Drives mode-aware preset resolution.
+    mode: Literal["generate", "edit", "both"] = "generate"
     identity_instruction: str
+    # Demoted from "the prompt" to the deterministic no-LLM fallback template:
+    # the prompt writer composes the body per situation, and this template is
+    # what the pipeline degrades to when the writer LLM is unavailable.
     prompt_structure: str
+    # Free-text style guidance fed to the prompt writer (informational, never a
+    # frozen block). Empty for template-only presets.
+    style_notes: str = ""
     # Stored data only — Nano Banana / Gemini has no negative-prompt API field;
     # the prompt builder inlines these terms into the prompt text as exclusions.
     negative_prompt: str
