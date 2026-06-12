@@ -489,6 +489,19 @@ async def test_two_step_chain_delivers_last_step_and_chains_images() -> None:
     assert [s.status for s in session.plan.steps] == ["completed", "completed"]
     assert all(s.result_ref is not None for s in session.plan.steps)
 
+    # A real chain narrates step progress around the iteration events.
+    assert h.bus.types == [
+        "step_started",
+        "iteration_start",
+        "iteration_result",
+        "step_result",
+        "step_started",
+        "iteration_start",
+        "iteration_result",
+        "step_result",
+        "result",
+    ]
+
 
 async def test_partial_chain_delivers_completed_steps() -> None:
     # Step 1 passes; step 2 never reaches the floor → ship step 1's best, a valid
@@ -523,6 +536,9 @@ async def test_skipped_step_is_not_generated() -> None:
 
     assert isinstance(result, ResultEvent)
     assert len(h.generator.calls) == 1  # only the pending step ran
+    # The skipped step is visible on the stream, never silently dropped.
+    skipped = [e for e in h.bus.events if e.type == "step_result" and e.status == "skipped"]
+    assert len(skipped) == 1
 
 
 # --- idempotency ---

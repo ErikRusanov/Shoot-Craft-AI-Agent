@@ -468,7 +468,13 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         return {"delivered": isinstance(outcome, ResultEvent)}
 
     async def done(state: GraphState) -> dict[str, Any]:
-        await svc.bus.publish(state["session_key"], DoneEvent())
+        session = await svc.store.get_session(state["session_key"])
+        steps = session.plan.steps if session and session.plan else []
+        completed = sum(1 for s in steps if s.status == "completed")
+        await svc.bus.publish(
+            state["session_key"],
+            DoneEvent(steps_completed=completed, steps_total=len(steps)),
+        )
         return {}
 
     async def fail(state: GraphState) -> dict[str, Any]:

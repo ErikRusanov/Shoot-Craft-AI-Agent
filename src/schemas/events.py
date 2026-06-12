@@ -20,7 +20,7 @@ from pydantic import Field, TypeAdapter
 
 from schemas.base import SchemaModel
 from schemas.enums import FailureCode, FsmState, GateReason, RiskLevel, Verdict
-from schemas.state import BestResult, CostEstimate, Plan
+from schemas.state import BestResult, CostEstimate, Plan, StepStatus
 
 
 class StageEvent(SchemaModel):
@@ -53,6 +53,30 @@ class CostEvent(SchemaModel):
 
     type: Literal["cost"] = "cost"
     cost: CostEstimate
+
+
+class StepStartedEvent(SchemaModel):
+    """Edit/generation step ``n`` of the chain has begun."""
+
+    type: Literal["step_started"] = "step_started"
+    n: int
+    title: str
+    targets: list[str] = Field(default_factory=list)
+
+
+class StepResultEvent(SchemaModel):
+    """Outcome of chain step ``n``.
+
+    ``status`` is ``completed`` (its best frame feeds the next step),
+    ``skipped`` (budget-trimmed, never generated) or ``pending`` (ran but reached
+    no deliverable — the chain stops here, earlier steps still ship).
+    """
+
+    type: Literal["step_result"] = "step_result"
+    n: int
+    status: StepStatus
+    result_ref: str | None = None
+    similarity: float | None = None
 
 
 class IterationStartEvent(SchemaModel):
@@ -142,10 +166,19 @@ class FailedEvent(SchemaModel):
 
 
 class DoneEvent(SchemaModel):
-    """Terminal success marker — closes the stream after ``result``."""
+    """Terminal success marker — closes the stream after ``result``.
 
+    Carries per-step accounting so the business service can tell a fully executed
+    plan from a partial chain (budget-trimmed or a step that found no
+    deliverable): ``steps_completed`` of ``steps_total`` ran to a kept-best. Both
+    are 0 for the legacy single-shot path that carries no step plan.
+    """
+
+    schema_v: int = 2
     type: Literal["done"] = "done"
     detail: str | None = None
+    steps_completed: int = 0
+    steps_total: int = 0
 
 
 Event = Annotated[
@@ -153,6 +186,8 @@ Event = Annotated[
     | NeedInputEvent
     | PlanEvent
     | CostEvent
+    | StepStartedEvent
+    | StepResultEvent
     | IterationStartEvent
     | IterationResultEvent
     | RetryEvent

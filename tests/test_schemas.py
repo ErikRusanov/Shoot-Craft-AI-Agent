@@ -49,6 +49,8 @@ from schemas import (
     StageEvent,
     StartSessionRequest,
     StartSessionResponse,
+    StepResultEvent,
+    StepStartedEvent,
     Thresholds,
     Verdict,
 )
@@ -210,6 +212,8 @@ _EVENT_CASES: list[Event] = [
     NeedInputEvent(slot="purpose", question="What is this for?", options=["a", "b"], default="a"),
     PlanEvent(plan=_plan()),
     CostEvent(cost=_cost()),
+    StepStartedEvent(n=1, title="background", targets=["background", "lighting"]),
+    StepResultEvent(n=1, status="completed", result_ref="s3://res/1.png", similarity=0.7),
     IterationStartEvent(n=1),
     IterationResultEvent(
         n=1,
@@ -230,7 +234,7 @@ _EVENT_CASES: list[Event] = [
         library_version="0.4.0",
     ),
     FailedEvent(code=FailureCode.INPUT_REJECTED, reason="no face", gate_reason=GateReason.NO_FACE),
-    DoneEvent(detail="delivered"),
+    DoneEvent(detail="delivered", steps_completed=2, steps_total=3),
 ]
 
 

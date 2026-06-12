@@ -61,6 +61,8 @@ from schemas import (
     ResultEvent,
     RetryEvent,
     SessionState,
+    StepResultEvent,
+    StepStartedEvent,
     Thresholds,
     Verdict,
 )
@@ -203,8 +205,23 @@ class GenerationLoop:
         # then each completed step's best. The identity anchor crop stays original.
         working = reference
         failure_reason, failure_code = _NO_DELIVERABLE, FailureCode.NO_DELIVERABLE
+        steps = self._plan_steps(session, preset)
+        # Step events narrate a real chain; a single-step (generate / legacy) run
+        # stays on the plain iteration events, so its stream is unchanged.
+        emit_steps = len(steps) > 1
 
-        for step in self._runnable_steps(session, preset):
+        for step in steps:
+            if step.status == "skipped":
+                if emit_steps:
+                    await self._bus.publish(
+                        session_key, StepResultEvent(n=step.n, status="skipped")
+                    )
+                continue
+            if emit_steps:
+                await self._bus.publish(
+                    session_key,
+                    StepStartedEvent(n=step.n, title=step.title, targets=list(step.targets)),
+                )
             outcome = await self._run_step(
                 session=session,
                 face=face,
@@ -225,26 +242,39 @@ class GenerationLoop:
             if outcome.best is None:
                 # This step produced no deliverable — stop the chain and ship
                 # whatever earlier steps delivered (a partial chain is valid).
+                if emit_steps:
+                    await self._bus.publish(
+                        session_key, StepResultEvent(n=step.n, status="pending")
+                    )
                 break
             step.status = "completed"
             step.result_ref = outcome.best.result_ref
             session.best_result = outcome.best  # the latest completed step wins
             working = outcome.best_bytes if outcome.best_bytes is not None else working
             await self._checkpoint(session)
+            if emit_steps:
+                await self._bus.publish(
+                    session_key,
+                    StepResultEvent(
+                        n=step.n,
+                        status="completed",
+                        result_ref=outcome.best.result_ref,
+                        similarity=outcome.best.similarity,
+                    ),
+                )
             if outcome.budget_exhausted:
                 break
 
         return await self._finish(session, failure_reason, failure_code)
 
-    def _runnable_steps(self, session: SessionState, preset: Preset) -> list[EditStep]:
-        """The pending steps to generate; a session without a plan is one step.
+    def _plan_steps(self, session: SessionState, preset: Preset) -> list[EditStep]:
+        """The plan's steps; a session without a plan is one synthetic step.
 
-        A ``skipped`` step (budget-trimmed by the planner) is not generated. With
-        no plan at all (the legacy single-shot path), a single synthetic step
+        With no plan (the legacy single-shot path), a single synthetic step
         carries the resolved slots — the deterministic body is then exactly today's.
         """
         if session.plan is not None and session.plan.steps:
-            return [s for s in session.plan.steps if s.status != "skipped"]
+            return session.plan.steps
         return [EditStep(n=1, title=preset.id, instruction="", targets=[])]
 
     async def _run_step(

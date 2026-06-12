@@ -44,6 +44,8 @@ from schemas.events import (
     ResultEvent,
     RetryEvent,
     StageEvent,
+    StepResultEvent,
+    StepStartedEvent,
 )
 from schemas.presets import (
     AppliesTo,
@@ -119,6 +121,8 @@ __all__ = [
     "StageEvent",
     "StartSessionRequest",
     "StartSessionResponse",
+    "StepResultEvent",
+    "StepStartedEvent",
     "StrictModel",
     "Thresholds",
     "Verdict",
