@@ -26,6 +26,11 @@ from schemas import Generation, Preset
 
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 _EXCLUSION_PREFIX = "Strictly avoid: "
+# The locked-attribute clause: deterministic, placed after the writer's body and
+# stated as overriding it, so a lock wins over anything the body says (passport
+# white background beats a user's "make it green"). Rendered by the builder, never
+# by the writer — the writer only sees lock values as informational context.
+_LOCK_PREFIX = "These must hold exactly, overriding any conflicting detail above: "
 
 # Prompt-injection guards for free-form (enum-less) slot text. A free-form slot
 # describes a *scene*; it must never carry instructions that reach past the scene
@@ -107,6 +112,63 @@ def build_prompt(preset: Preset, slots: Mapping[str, str], *, addendum: str = ""
     text = "\n\n".join(parts)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return BuiltPrompt(text=text, prompt_hash=digest, params=preset.generation)
+
+
+def fill_template(preset: Preset, slots: Mapping[str, str], *, addendum: str = "") -> str:
+    """The deterministic body — the filled ``prompt_structure``, no frozen wrap.
+
+    This is what :class:`~services.prompt_writer.DeterministicPromptWriter` returns
+    and what the LLM writer falls back to: the same substitution
+    :func:`build_prompt` does, minus the identity/exclusion blocks (those are the
+    builder's to add in :func:`assemble_prompt`). Slots are validated exactly as
+    the legacy path validates them.
+    """
+    _validate_slots(preset, slots)
+    structure = _PLACEHOLDER.sub(lambda m: slots[m.group(1)], preset.prompt_structure)
+    if addendum.strip():
+        return f"{structure}\n\n{addendum.strip()}"
+    return structure
+
+
+def assemble_prompt(
+    preset: Preset, body: str, *, locks: Mapping[str, str] | None = None
+) -> BuiltPrompt:
+    """Assemble the final prompt around a writer-composed ``body``.
+
+    The new assembly path (the writer's, not the template's): ``identity (frozen)
+    + body (writer, sanitized) + locks (deterministic) + exclusion (frozen)``. The
+    body is sanitized with the same injection guards the free-form slot used, so a
+    misbehaving writer cannot reach past the scene to edit the identity block or
+    override the exclusions. Locked attributes are rendered here, deterministically,
+    so they win over the body. ``prompt_hash`` is the same sha256-over-text the
+    legacy path produces, so reproducibility is unchanged.
+    """
+    _reject_body_injection(preset, body)
+    parts = [preset.identity_instruction, body.strip()]
+    if locks:
+        rendered = "; ".join(f"{name} — {value}" for name, value in sorted(locks.items()))
+        parts.append(f"{_LOCK_PREFIX}{rendered}.")
+    parts.append(_EXCLUSION_PREFIX + preset.negative_prompt)
+
+    text = "\n\n".join(parts)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return BuiltPrompt(text=text, prompt_hash=digest, params=preset.generation)
+
+
+def _reject_body_injection(preset: Preset, body: str) -> None:
+    """Reject a writer-composed body that reads as a prompt injection.
+
+    Same guards as the free-form slot, applied to the whole body: the writer
+    describes a scene/edit and must never carry instructions that reach past it to
+    alter the frozen identity block or override the exclusions.
+    """
+    lowered = body.lower()
+    for pattern in _INJECTION_PATTERNS:
+        if pattern.search(lowered):
+            raise FreeFormRejectedError(
+                f"preset {preset.id!r}: composed body rejected — it reads as an "
+                f"instruction to alter identity or override the prompt"
+            )
 
 
 def _validate_slots(preset: Preset, slots: Mapping[str, str]) -> None:
