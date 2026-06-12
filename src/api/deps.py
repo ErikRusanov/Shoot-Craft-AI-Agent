@@ -114,8 +114,11 @@ def _accounting(session: SessionState | None) -> dict[str, Any]:
 def build_pricing(settings: Settings) -> PricingTable:
     """The pricing table for this process: built-in rates plus startup overrides.
 
-    Fails fast (here, not mid-session) if the configured generation or slot-filler
-    model has no rate after overrides are applied.
+    Fails fast (here, not mid-session) if any configured model has no rate after
+    overrides are applied. A per-stage model outside the built-in table (the
+    defaults plus :data:`~services.pricing.KNOWN_AUX_RATES`) aliases the lite
+    rate — aux calls settle on the provider-reported cost, so the rate is
+    forecasting only and a cheap-ish guess beats a startup crash on rename.
     """
     pricing = PricingTable.default(
         generation_model=settings.generation_model, lite_model=settings.slot_filler_model
@@ -123,15 +126,17 @@ def build_pricing(settings: Settings) -> PricingTable:
     if settings.pricing_overrides_json:
         overrides = json.loads(settings.pricing_overrides_json)
         pricing = PricingTable.model_validate({**pricing.model_dump(mode="json"), **overrides})
-    # The classifier shares the lite model's rate by default; if configured to a
-    # different model with no explicit rate, alias it to the slot filler's.
-    if settings.classifier_model not in pricing.model_rates:
-        pricing.model_rates[settings.classifier_model] = pricing.rate_for(
-            settings.slot_filler_model
-        )
+    stage_models = (
+        settings.brief_parser_model,
+        settings.planner_model,
+        settings.inventory_model,
+        settings.prompt_writer_model,
+    )
+    for model in stage_models:
+        if model not in pricing.model_rates:
+            pricing.model_rates[model] = pricing.rate_for(settings.slot_filler_model)
     pricing.rate_for(settings.generation_model)
     pricing.rate_for(settings.slot_filler_model)
-    pricing.rate_for(settings.classifier_model)
     return pricing
 
 
@@ -431,9 +436,9 @@ def build_container(settings: Settings) -> Container:
         )
         generator = OpenRouterImageGenerator(openrouter, model=settings.generation_model)
         slot_filler = OpenRouterSlotFiller(openrouter, model=settings.slot_filler_model)
-        brief_parser = OpenRouterBriefParser(openrouter, model=settings.classifier_model)
-        planner = OpenRouterStepPlanner(openrouter, model=settings.slot_filler_model)
-        writer = OpenRouterPromptWriter(openrouter, model=settings.slot_filler_model)
+        brief_parser = OpenRouterBriefParser(openrouter, model=settings.brief_parser_model)
+        planner = OpenRouterStepPlanner(openrouter, model=settings.planner_model)
+        writer = OpenRouterPromptWriter(openrouter, model=settings.prompt_writer_model)
         # One InsightFace pack serves both ports from a single inference pass.
         insight = InsightFaceEmbedder(
             model_pack=settings.insightface_model,

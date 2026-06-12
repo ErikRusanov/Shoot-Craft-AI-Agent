@@ -63,10 +63,16 @@ class Settings(BaseSettings):
     # Cheap GA text model for the LLM slot filler (structured output, $0.25/M
     # in as of 2026-06); falls back to DefaultSlotFiller on any misbehavior.
     slot_filler_model: str = "google/gemini-3.1-flash-lite"
-    # Cheap text model that maps the user's free-text brief onto a use_case
-    # token; falls back to deterministic token-overlap on any misbehavior. Same
-    # model as the slot filler by default, so the pricing table already covers it.
-    classifier_model: str = "google/gemini-3.1-flash-lite"
+    # Per-stage models. The reasoning-heavy stages (brief parsing, step
+    # planning, photo cataloguing) ride a smarter-but-still-cheap model —
+    # claude-haiku-4.5 ($1/M in, $5/M out as of 2026-06, vision-capable) —
+    # because their mistakes compound through the whole chain; the prompt
+    # writer composes one paragraph per step and stays on the lite model.
+    # Every stage degrades to its deterministic fallback on any misbehavior.
+    brief_parser_model: str = "anthropic/claude-haiku-4.5"
+    planner_model: str = "anthropic/claude-haiku-4.5"
+    inventory_model: str = "anthropic/claude-haiku-4.5"  # must be vision-capable
+    prompt_writer_model: str = "google/gemini-3.1-flash-lite"
 
     # --- Face check (CV, not LLM) ---
     insightface_model: str = "buffalo_l"

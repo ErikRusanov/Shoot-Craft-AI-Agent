@@ -47,6 +47,17 @@ class ModelRate(BaseModel):
     image_output_per_mtok: Decimal = Decimal("0")
 
 
+# Published OpenRouter rates (June 2026) for the auxiliary text/vision models a
+# stage may be configured to. Aux calls settle on the provider-reported
+# usage.cost, so these rates are startup validation and forecasting only.
+KNOWN_AUX_RATES: dict[str, ModelRate] = {
+    "anthropic/claude-haiku-4.5": ModelRate(
+        input_per_mtok=Decimal("1"),
+        text_output_per_mtok=Decimal("5"),
+    ),
+}
+
+
 class PricingTable(BaseModel):
     """Provider rates and the token model that turns a call into dollars."""
 
@@ -93,6 +104,7 @@ class PricingTable(BaseModel):
                     input_per_mtok=Decimal("0.25"),
                     text_output_per_mtok=Decimal("1.50"),
                 ),
+                **KNOWN_AUX_RATES,
             }
         )
 
