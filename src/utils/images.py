@@ -9,12 +9,35 @@ testable on synthetic frames.
 from __future__ import annotations
 
 import io
+import math
+from collections.abc import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageFilter, UnidentifiedImageError
 
 Bbox = tuple[float, float, float, float]  # (x1, y1, x2, y2) in pixels
+
+
+def nearest_aspect_ratio(width: int, height: int, supported: Sequence[str]) -> str:
+    """The supported ``"W:H"`` string closest to ``width/height``.
+
+    Closest in log space — ``|log(actual / candidate)|`` — so a 2:1 frame is as
+    far from 1:1 as a 1:2 frame is, which plain ratio differences get wrong.
+    Used in edit mode to keep the generated frame on the source photo's
+    composition instead of forcing the preset's generate-mode ratio.
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError("frame dimensions must be positive")
+    if not supported:
+        raise ValueError("no supported aspect ratios to choose from")
+    actual = width / height
+
+    def distance(candidate: str) -> float:
+        w, _, h = candidate.partition(":")
+        return abs(math.log(actual / (int(w) / int(h))))
+
+    return min(supported, key=distance)
 
 
 def decode_rgb(data: bytes) -> Image.Image:

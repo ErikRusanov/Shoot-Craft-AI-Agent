@@ -37,6 +37,7 @@ from schemas import (
     FsmState,
     GateReason,
     Generation,
+    PhotoInventory,
     Plan,
     Preset,
     ResultEvent,
@@ -539,6 +540,102 @@ async def test_skipped_step_is_not_generated() -> None:
     # The skipped step is visible on the stream, never silently dropped.
     skipped = [e for e in h.bus.events if e.type == "step_result" and e.status == "skipped"]
     assert len(skipped) == 1
+
+
+async def test_chain_locks_prior_results_and_scopes_each_step() -> None:
+    h = await make_harness(similarities=[0.9, 0.88, 0.85])
+    await _set_plan(
+        h,
+        [
+            EditStep(
+                n=1,
+                title="bg",
+                instruction="make the background a dark stage",
+                targets=["background"],
+                applied="the new dark stage backdrop",
+            ),
+            EditStep(
+                n=2,
+                title="shirt",
+                instruction="swap the t-shirt for a plain crisp one",
+                targets=["clothing"],
+                # no `applied` — later steps lock the generic fallback phrase
+            ),
+            EditStep(
+                n=3,
+                title="mic",
+                instruction="add a headset microphone over the ear",
+                targets=["accessory"],
+            ),
+        ],
+    )
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)
+    p1, p2, p3 = (call.prompt for call in h.generator.calls)
+
+    # Every edit step carries the lock block and its own single-change scope.
+    for prompt, instruction in (
+        (p1, "make the background a dark stage"),
+        (p2, "swap the t-shirt for a plain crisp one"),
+        (p3, "add a headset microphone over the ear"),
+    ):
+        assert "LOCKED — the following must be copied exactly" in prompt
+        assert f"The ONLY change allowed in this edit is: {instruction}." in prompt
+
+    # The ledger accumulates: step 1's result locks from step 2 on, step 2's
+    # (planner left `applied` empty) locks via the generic fallback phrase.
+    assert "the new dark stage backdrop (already final — keep it exactly)" not in p1
+    assert "the new dark stage backdrop (already final — keep it exactly)" in p2
+    assert "the new dark stage backdrop (already final — keep it exactly)" in p3
+    assert (
+        "the result of the earlier edit: swap the t-shirt for a plain crisp one "
+        "(already final — keep it exactly)"
+    ) in p3
+
+    # The recorded prompt_text matches what was sent (debuggable history).
+    session = await h.session()
+    assert [it.prompt_text for it in session.iterations] == [p1, p2, p3]
+
+
+async def test_inventory_feeds_the_lock_block() -> None:
+    h = await make_harness(similarities=[0.9])
+    face = await h.store.get_face(FACE_KEY)
+    assert face is not None
+    face.inventory = PhotoInventory(
+        clothing="beige t-shirt",
+        accessories=["wedding ring on the right hand"],
+        background="a dim living room",
+    )
+    await h.store.put_face(face, ttl_seconds=TTL)
+    await _set_plan(
+        h,
+        [EditStep(n=1, title="bg", instruction="a clean stage behind", targets=["background"])],
+    )
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)
+    prompt = h.generator.calls[0].prompt
+    assert "the clothing: beige t-shirt" in prompt
+    assert "wedding ring on the right hand" in prompt
+    assert "a dim living room" not in prompt  # the edited region is unlocked
+
+
+async def test_edit_mode_matches_the_source_aspect_ratio() -> None:
+    h = await make_harness(similarities=[0.9])
+    face = await h.store.get_face(FACE_KEY)
+    assert face is not None
+    face.metrics.width, face.metrics.height = 864, 1184  # a 3:4-ish portrait
+    await h.store.put_face(face, ttl_seconds=TTL)
+    await _set_plan(
+        h, [EditStep(n=1, title="bg", instruction="blue background", targets=["background"])]
+    )
+    result = await h.run()
+
+    assert isinstance(result, ResultEvent)
+    # The preset says 1:1; the source photo wins in edit mode.
+    assert h.preset.generation.aspect_ratio == "1:1"
+    assert h.generator.calls[0].params.aspect_ratio == "3:4"
 
 
 # --- idempotency ---

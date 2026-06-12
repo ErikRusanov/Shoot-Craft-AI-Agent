@@ -56,6 +56,7 @@ from schemas import (
     IterationStartEvent,
     PaidCallKind,
     PaidCallRecord,
+    PhotoInventory,
     Preset,
     ProviderUsage,
     ResultEvent,
@@ -70,13 +71,31 @@ from services.budget import BudgetService
 from services.facecheck import FaceCheckResult, FaceCheckService
 from services.idempotency import IdempotencyService
 from services.pricing import PricingTable
-from services.prompt_builder import BuiltPrompt, assemble_prompt, fill_template
+from services.prompt_builder import (
+    BuiltPrompt,
+    FreeFormRejectedError,
+    assemble_edit_prompt,
+    assemble_prompt,
+    edit_lock_items,
+    fill_template,
+)
+from utils.images import nearest_aspect_ratio
 
 logger = structlog.get_logger(__name__)
 
 # Each retry halves the temperature: identity drift is the failure being
 # corrected, and lower temperature trades variety for fidelity.
 _TEMPERATURE_DECAY = 0.5
+
+# image_config.aspect_ratio vocabulary shared by the Gemini image models
+# (OpenRouter image-generation guide, June 2026). Edit mode snaps to the source
+# photo's nearest ratio: forcing the preset's generate-mode ratio would make the
+# model recompose the frame — the opposite of "copy it pixel-for-pixel".
+_SUPPORTED_RATIOS = ("1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9")
+
+# A completed step whose planner left `applied` empty still locks its outcome,
+# just generically.
+_APPLIED_FALLBACK = "the result of the earlier edit: {instruction}"
 
 _BUDGET_EXHAUSTED = "budget exhausted before reaching the identity target"
 _NO_DELIVERABLE = "no attempt reached the identity floor"
@@ -210,6 +229,30 @@ class GenerationLoop:
         # stays on the plain iteration events, so its stream is unchanged.
         emit_steps = len(steps) > 1
 
+        # Edit mode keeps the source photo's composition: the frame's nearest
+        # supported ratio overrides the preset's generate-mode value on every step.
+        aspect_ratio = (
+            nearest_aspect_ratio(face.metrics.width, face.metrics.height, _SUPPORTED_RATIOS)
+            if mode == "edit"
+            else None
+        )
+        # The cumulative lock ledger, derived from the step record so a resumed
+        # chain re-locks exactly what its completed steps already changed.
+        applied: list[str] = []
+        edited_targets: list[str] = []
+        edited_text: list[str] = []
+
+        def absorb(completed: EditStep) -> None:
+            applied.append(
+                completed.applied or _APPLIED_FALLBACK.format(instruction=completed.instruction)
+            )
+            edited_targets.extend(completed.targets)
+            edited_text.append(completed.instruction)
+
+        for step in steps:
+            if step.status == "completed":
+                absorb(step)
+
         for step in steps:
             if step.status == "skipped":
                 if emit_steps:
@@ -217,11 +260,24 @@ class GenerationLoop:
                         session_key, StepResultEvent(n=step.n, status="skipped")
                     )
                 continue
+            if step.status == "completed":  # a resumed chain replays past steps
+                continue
             if emit_steps:
                 await self._bus.publish(
                     session_key,
                     StepStartedEvent(n=step.n, title=step.title, targets=list(step.targets)),
                 )
+            lock_items = (
+                edit_lock_items(
+                    face.inventory,
+                    preserve=preserve,
+                    applied=applied,
+                    edited_targets=[*edited_targets, *step.targets],
+                    edited_text=" ".join([*edited_text, step.instruction]),
+                )
+                if mode == "edit"
+                else []
+            )
             outcome = await self._run_step(
                 session=session,
                 face=face,
@@ -237,6 +293,9 @@ class GenerationLoop:
                 working_image=working,
                 face_crop=face_crop,
                 preset_meta=preset_meta,
+                lock_items=lock_items,
+                applied=tuple(applied),
+                aspect_ratio=aspect_ratio,
             )
             failure_reason, failure_code = outcome.failure_reason, outcome.failure_code
             if outcome.best is None:
@@ -251,6 +310,7 @@ class GenerationLoop:
             step.result_ref = outcome.best.result_ref
             session.best_result = outcome.best  # the latest completed step wins
             working = outcome.best_bytes if outcome.best_bytes is not None else working
+            absorb(step)  # the next step locks this one's outcome
             await self._checkpoint(session)
             if emit_steps:
                 await self._bus.publish(
@@ -294,15 +354,29 @@ class GenerationLoop:
         working_image: bytes,
         face_crop: bytes | None,
         preset_meta: dict[str, str | None],
+        lock_items: list[str],
+        applied: tuple[str, ...],
+        aspect_ratio: str | None,
     ) -> _StepOutcome:
         """Run the retry cycle for one step against ``working_image``."""
         session_key = session.session_key
         request = self._write_request(
-            preset, mode, step, preserve, locked, defaults, addendum, session.slots
+            preset,
+            mode,
+            step,
+            preserve,
+            locked,
+            defaults,
+            addendum,
+            session.slots,
+            inventory=face.inventory,
+            applied=applied,
         )
         base = await self._writer.compose(request, photo_metrics=face.metrics, meter=meter)
         await self._record_writer_cost(session, base)
-        base_built = assemble_prompt(preset, base.body, locks=locked)
+        base_built = self._assemble(
+            preset, base.body, mode=mode, step=step, locked=locked, lock_items=lock_items
+        )
         prev_body = base.body
         base_temperature = base_built.params.temperature
 
@@ -319,13 +393,17 @@ class GenerationLoop:
                 revised = await self._writer.revise(prev_body, last, request=request, meter=meter)
                 await self._record_writer_cost(session, revised)
                 prev_body = revised.body
-                built = assemble_prompt(preset, revised.body, locks=locked)
+                built = self._assemble(
+                    preset, revised.body, mode=mode, step=step, locked=locked, lock_items=lock_items
+                )
                 params = base_built.params.model_copy(
                     update={"temperature": base_temperature * _TEMPERATURE_DECAY ** (attempt - 1)}
                 )
             else:
                 built = base_built
                 params = base_built.params
+            if aspect_ratio is not None:
+                params = params.model_copy(update={"aspect_ratio": aspect_ratio})
 
             reservation = await meter.reserve(
                 PaidCallKind.GENERATION, estimate=self._reserve_estimate(built, send_crop=face_crop)
@@ -490,7 +568,7 @@ class GenerationLoop:
 
             if check.verdict is Verdict.PASSED:
                 break
-            last = WriterFeedback(check.similarity, check.verdict)
+            last = WriterFeedback(check.similarity, check.verdict, attempt)
             failure_reason, failure_code = _NO_DELIVERABLE, FailureCode.NO_DELIVERABLE
             if attempt < max_attempts:
                 await self._bus.publish(
@@ -504,6 +582,35 @@ class GenerationLoop:
 
         return _StepOutcome(step_best, step_best_bytes, failure_reason, failure_code, False)
 
+    def _assemble(
+        self,
+        preset: Preset,
+        body: str,
+        *,
+        mode: str,
+        step: EditStep,
+        locked: dict[str, str],
+        lock_items: list[str],
+    ) -> BuiltPrompt:
+        """Edit steps get the lock-block assembly; everything else today's.
+
+        A step instruction the guards reject degrades to the legacy assembly
+        (belt-and-braces — it already passed resolve-time sanitization); a
+        poisoned *body* re-raises out of ``assemble_prompt`` exactly as before.
+        """
+        if mode == "edit" and step.instruction.strip():
+            try:
+                return assemble_edit_prompt(
+                    preset,
+                    body,
+                    only_change=step.instruction,
+                    lock_items=lock_items,
+                    locks=locked,
+                )
+            except FreeFormRejectedError:
+                logger.warning("generation_loop.edit_assembly_rejected", step_n=step.n)
+        return assemble_prompt(preset, body, locks=locked)
+
     def _write_request(
         self,
         preset: Preset,
@@ -514,6 +621,9 @@ class GenerationLoop:
         defaults: dict[str, str],
         addendum: str,
         slots: dict[str, str],
+        *,
+        inventory: PhotoInventory | None = None,
+        applied: tuple[str, ...] = (),
     ) -> WriteRequest:
         """Build the writer's request — and its deterministic fallback body."""
         template_body = fill_template(
@@ -527,6 +637,8 @@ class GenerationLoop:
             defaults=defaults,
             style_notes=preset.style_notes,
             template_body=template_body,
+            inventory=inventory,
+            applied=applied,
         )
 
     @staticmethod

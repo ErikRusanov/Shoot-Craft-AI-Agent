@@ -26,7 +26,7 @@ from decimal import Decimal
 from typing import Literal, NamedTuple, Protocol, runtime_checkable
 
 from protocols.budget import BudgetMeter
-from schemas import FrameMetrics, ProviderUsage, Verdict
+from schemas import FrameMetrics, PhotoInventory, ProviderUsage, Verdict
 
 
 class WriteRequest(NamedTuple):
@@ -37,7 +37,10 @@ class WriteRequest(NamedTuple):
     ``prompt_structure``) the writer returns verbatim when it cannot do better;
     ``locked`` lists non-negotiable attribute values so the body does not fight
     them, and ``defaults`` the preset defaults the body should honor unless a
-    change overrides them.
+    change overrides them. ``inventory`` (edit mode) is what the reference photo
+    shows, so the body can integrate the change concretely; ``applied`` are the
+    earlier steps' results at their new values, already locked by the builder —
+    informational, so the body does not re-describe or fight them.
     """
 
     mode: Literal["edit", "generate"]
@@ -47,17 +50,20 @@ class WriteRequest(NamedTuple):
     defaults: dict[str, str]  # non-locked preset defaults to honor unless changed
     style_notes: str
     template_body: str  # deterministic fallback body (filled prompt_structure)
+    inventory: PhotoInventory | None = None  # what the reference photo shows
+    applied: tuple[str, ...] = ()  # earlier steps' changes at their new values
 
 
 class WriterFeedback(NamedTuple):
     """What the prior attempt measured — drives a revision.
 
-    Face-check only for now (similarity + verdict); the VLM compliance critique
-    plugs in here later without re-architecture.
+    Face-check only for now (similarity + verdict + which attempt produced it);
+    the VLM compliance critique plugs in here later without re-architecture.
     """
 
     similarity: float | None
     verdict: Verdict | None
+    attempt: int | None = None  # 1-based attempt number that was measured
 
 
 class WriteResult(NamedTuple):
