@@ -110,6 +110,21 @@ DI flow: `api/deps.py` binds connectors behind ports → graph nodes call servic
   (frozen)` — so a lock wins over the body and the frozen blocks are untouchable.
   Every writer node degrades to the no-LLM fallback (the filled `prompt_structure`
   template + the fixed identity-emphasis line) when the writer is unavailable.
+- **Edit-mode identity lock.** A one-per-photo VLM call (`extract_inventory`
+  node, `InventoryExtractor` port) catalogues what the reference photo shows
+  (pose, hands, accessories, clothing, hair, lighting, background) into
+  `FaceProfile.inventory`. Edit steps assemble via
+  `prompt_builder.assemble_edit_prompt`: a deterministic **LOCKED** enumeration
+  (generic person lock + inventory + preserve-list + completed steps' `applied`
+  phrases at their *new* values, minus the regions any step has edited), a
+  single-change scope line ("the ONLY change allowed is …"), the writer's
+  delta-only body, and a face-texture/integration block. The planner emits one
+  change per step (only background/lighting/grade merge), ordered scene-first →
+  clothing → face-adjacent last, each step with an `applied` phrase for the
+  ledger. Edit mode also overrides the preset `aspect_ratio` with the source
+  photo's nearest supported ratio — forcing a different ratio makes the model
+  recompose the frame. An empty inventory degrades to the generic person lock;
+  nothing in this path can fail a session.
 
 ## Presets
 
@@ -144,9 +159,9 @@ an edit brief with no curated use-case). Its single `ask:true` slot (`scene`) is
 the one **free-form** (no-enum) slot, fed from the brief; `assemble_prompt`
 sanitizes the composed body (scene description only — attempts to edit the
 face/identity or override the frozen blocks are rejected, the caller re-asks).
-`PRESET_MIN_LIBRARY_VERSION` (default `0.5.0` — preset schema v4) is enforced in
-`package` mode at startup so a deploy can't silently lose the fallback or run a
-stale contract.
+`PRESET_MIN_LIBRARY_VERSION` (default `0.7.0` — preset schema v4 plus the
+pixel-for-pixel lock blocks in the edit fallback) is enforced in `package` mode
+at startup so a deploy can't silently lose the fallback or run a stale contract.
 
 `SessionState` must record `preset_id`, `preset_version` **and** `library_version`
 (the package version) — otherwise a result can't be reproduced after a library
