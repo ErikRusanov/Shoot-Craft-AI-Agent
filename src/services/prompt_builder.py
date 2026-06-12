@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
-from schemas import Generation, Preset
+from schemas import Generation, PhotoInventory, Preset
 
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 _EXCLUSION_PREFIX = "Strictly avoid: "
@@ -31,6 +31,131 @@ _EXCLUSION_PREFIX = "Strictly avoid: "
 # white background beats a user's "make it green"). Rendered by the builder, never
 # by the writer — the writer only sees lock values as informational context.
 _LOCK_PREFIX = "These must hold exactly, overriding any conflicting detail above: "
+
+# --- Edit-mode lock block ---------------------------------------------------
+# The deterministic wrapper that makes a chained edit conservative: enumerate
+# everything that must survive ("LOCKED … copy pixel-for-pixel"), scope the step
+# to a single change ("the ONLY change allowed"), and pin the face texture.
+# Rendered by the builder, never by the writer — exactly like the identity and
+# exclusion blocks.
+
+# The face/skin/body lock is unconditional: it opens every enumeration and is
+# never excludable, so an empty inventory still locks the person (the
+# degradation path is generic, not absent).
+_GENERIC_PERSON_LOCK = (
+    "the person — entire face, every facial feature, expression, eyes, nose, "
+    "mouth, jaw, skin texture and skin tone, hair, and body"
+)
+_LOCKED_PREFIX = (
+    "LOCKED — the following must be copied exactly from the provided image, unchanged: "
+)
+_LOCKED_SUFFIX = (
+    " Do NOT regenerate, repaint, smooth, retouch, denoise or beautify any locked "
+    "part — copy it pixel-for-pixel from the input image. Treat the person as "
+    "untouchable."
+)
+_ONLY_CHANGE_PREFIX = "The ONLY change allowed in this edit is: "
+_TEXTURE_BLOCK = (
+    "Keep the face at the exact original sharpness, grain and raw skin texture — no "
+    "plastic or waxy skin, no airbrushing, no blur on the face. Where the change "
+    "meets the scene, match the existing light direction and keep shadows, "
+    "reflections and grain consistent with the rest of the photo."
+)
+_APPLIED_SUFFIX = " (already final — keep it exactly)"
+
+# Inventory fields in render order, with their human labels. Only the fields in
+# _FIELD_REGIONS are ever excluded from the lock (when the step edits them);
+# pose, hands and facial hair stay locked no matter what the step targets —
+# they sit too close to the identity to ever unlock by keyword.
+_FIELD_LABELS: tuple[tuple[str, str], ...] = (
+    ("pose", "the pose"),
+    ("hands", "the hands"),
+    ("clothing", "the clothing"),
+    ("hair", "the hair"),
+    ("facial_hair", "the facial hair"),
+    ("framing", "the framing"),
+    ("lighting", "the lighting"),
+    ("background", "the background"),
+)
+# Synonyms a step target may use for an editable inventory region. Intentionally
+# a simple keyword map: a miss only over-locks (the step instruction still wins
+# as "the ONLY change allowed"), never under-locks. If it misfires in practice,
+# promote it to a planner-emitted `unlocks` list on EditStep.
+_FIELD_REGIONS: dict[str, frozenset[str]] = {
+    "background": frozenset({"background", "backdrop", "setting", "scene", "wall"}),
+    "lighting": frozenset({"lighting", "light", "grade", "tone", "color", "colour"}),
+    "clothing": frozenset(
+        {
+            "clothing",
+            "clothes",
+            "shirt",
+            "t-shirt",
+            "tshirt",
+            "outfit",
+            "attire",
+            "garment",
+            "top",
+            "jacket",
+            "dress",
+            "suit",
+        }
+    ),
+    "hair": frozenset({"hair", "hairstyle", "haircut"}),
+    "framing": frozenset({"framing", "crop", "zoom"}),
+}
+# Tokens too generic to identify an accessory: shared placement words must not
+# unlock "wedding ring on the right hand" because the instruction says "in the
+# left ear", and shared colors must not unlock "white earbud" because the step
+# asks for a "white t-shirt" — only the accessory's own nouns count.
+_ACCESSORY_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "in",
+        "on",
+        "with",
+        "and",
+        "or",
+        "of",
+        "to",
+        "at",
+        "his",
+        "her",
+        "their",
+        "left",
+        "right",
+        "hand",
+        "ear",
+        "ears",
+        "wrist",
+        "neck",
+        "head",
+        "finger",
+        "new",
+        "existing",
+        "white",
+        "black",
+        "beige",
+        "blue",
+        "red",
+        "green",
+        "grey",
+        "gray",
+        "brown",
+        "pink",
+        "yellow",
+        "orange",
+        "purple",
+        "golden",
+        "gold",
+        "silver",
+        "dark",
+        "light",
+        "navy",
+    }
+)
+_TOKEN = re.compile(r"[a-z][a-z-]{2,}")
 
 # Prompt-injection guards for free-form (enum-less) slot text. A free-form slot
 # describes a *scene*; it must never carry instructions that reach past the scene
@@ -148,6 +273,116 @@ def assemble_prompt(
     """
     _reject_body_injection(preset, body)
     parts = [preset.identity_instruction, body.strip()]
+    if locks:
+        rendered = "; ".join(f"{name} — {value}" for name, value in sorted(locks.items()))
+        parts.append(f"{_LOCK_PREFIX}{rendered}.")
+    parts.append(_EXCLUSION_PREFIX + preset.negative_prompt)
+
+    text = "\n\n".join(parts)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return BuiltPrompt(text=text, prompt_hash=digest, params=preset.generation)
+
+
+def _content_tokens(text: str) -> set[str]:
+    return {t for t in _TOKEN.findall(text.lower()) if t not in _ACCESSORY_STOPWORDS}
+
+
+def _is_injection(text: str) -> bool:
+    lowered = text.lower()
+    return any(pattern.search(lowered) for pattern in _INJECTION_PATTERNS)
+
+
+def edit_lock_items(
+    inventory: PhotoInventory | None,
+    *,
+    preserve: Sequence[str] = (),
+    applied: Sequence[str] = (),
+    edited_targets: Sequence[str] = (),
+    edited_text: str = "",
+) -> list[str]:
+    """The lock enumeration for one edit step, most identity-critical first.
+
+    The generic person lock always opens the list (the whole degradation path
+    when ``inventory`` is empty/None). ``edited_targets``/``edited_text`` cover
+    the current step **and** every completed step: the inventory describes the
+    *original* photo, so a region an earlier step already changed must not be
+    re-locked at its stale value — its ``applied`` phrase (the new value) locks
+    it instead. Fields are excluded via the region keyword map; an accessory is
+    excluded when it shares a content token with the edited text ("replace the
+    existing earbud…" unlocks the earbud item, never the ring). ``preserve``
+    entries (user-derived) append after the inventory.
+
+    Items are *enumerated text*, not instructions: a preserve/inventory entry
+    that reads as an injection is silently dropped — the generic person lock
+    already covers the face, so dropping costs specificity, not safety, and a
+    benign "don't change my face" must not fail the step.
+    """
+    items = [_GENERIC_PERSON_LOCK]
+    target_tokens = {t.strip().lower() for t in edited_targets if t.strip()}
+    edited_regions = {
+        field
+        for field, synonyms in _FIELD_REGIONS.items()
+        if any(token in synonyms for token in target_tokens)
+    }
+    unlock_tokens = _content_tokens(edited_text) | _content_tokens(" ".join(edited_targets))
+
+    if inventory is not None:
+        for field, label in _FIELD_LABELS:
+            if field in edited_regions:
+                continue
+            value = getattr(inventory, field).strip()
+            if value:
+                items.append(f"{label}: {value}")
+        for accessory in inventory.accessories:
+            if _content_tokens(accessory) & unlock_tokens:
+                continue  # this accessory is what the step edits
+            items.append(accessory)
+
+    items += [p.strip() for p in preserve if p.strip()]
+    items += [f"{a.strip()}{_APPLIED_SUFFIX}" for a in applied if a.strip()]
+    return [item for item in items if not _is_injection(item)]
+
+
+def assemble_edit_prompt(
+    preset: Preset,
+    body: str,
+    *,
+    only_change: str,
+    lock_items: Sequence[str],
+    locks: Mapping[str, str] | None = None,
+) -> BuiltPrompt:
+    """Assemble the edit-mode prompt: lock block + single-change scope + body.
+
+    The edit-mode sibling of :func:`assemble_prompt` — same frozen blocks, same
+    sanitization, plus the deterministic lock enumeration and the texture
+    block. ``only_change`` is the step's instruction (user-derived, so it goes
+    through the injection guards; the caller degrades to :func:`assemble_prompt`
+    on rejection). Layout::
+
+        identity (frozen)
+        LOCKED — … copy pixel-for-pixel … untouchable.
+        The ONLY change allowed in this edit is: …
+        body (writer, sanitized)
+        face texture + integration block
+        preset locks (deterministic, win over the body)
+        Strictly avoid: … (frozen)
+    """
+    change = only_change.strip()
+    if _is_injection(change):
+        raise FreeFormRejectedError(
+            f"preset {preset.id!r}: step instruction rejected — it reads as an "
+            f"instruction to alter identity or override the prompt"
+        )
+    _reject_body_injection(preset, body)
+
+    items = list(lock_items) or [_GENERIC_PERSON_LOCK]
+    parts = [
+        preset.identity_instruction,
+        _LOCKED_PREFIX + "; ".join(items) + "." + _LOCKED_SUFFIX,
+        f"{_ONLY_CHANGE_PREFIX}{change.rstrip('.')}.",
+        body.strip(),
+        _TEXTURE_BLOCK,
+    ]
     if locks:
         rendered = "; ".join(f"{name} — {value}" for name, value in sorted(locks.items()))
         parts.append(f"{_LOCK_PREFIX}{rendered}.")

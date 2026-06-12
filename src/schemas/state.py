@@ -184,12 +184,19 @@ class EditStep(StrictModel):
     targets this step applies (compatible deltas merge into one step). ``status``
     tracks chain progress; ``result_ref`` is the object-storage key of the step's
     kept-best frame once it completes.
+
+    ``applied`` is a short noun phrase naming the changed attribute at its NEW
+    value ("the new plain white crew-neck t-shirt") — once the step completes,
+    later steps lock this phrase as untouchable so a chained edit cannot undo
+    an earlier one. Filled by the LLM planner; empty falls back to a generic
+    "result of the earlier edit" phrase in the loop.
     """
 
     n: int
     title: str
     instruction: str
     targets: list[str] = Field(default_factory=list)
+    applied: str = ""
     status: StepStatus = "pending"
     result_ref: str | None = None
 
