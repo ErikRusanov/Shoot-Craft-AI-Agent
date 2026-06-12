@@ -17,6 +17,7 @@ import httpx
 from protocols import BudgetMeter
 from services.brief_parser import SCENE_TARGET, DeterministicBriefParser, deterministic_analysis
 from services.budget import BudgetService
+from services.classifier import FALLBACK_USE_CASE, best_use_case
 from services.connectors import InMemoryStateStore, OpenRouterBriefParser
 from services.pricing import PricingTable
 from tests.openrouter_mock import scripted_client, text_completion_body
@@ -37,6 +38,19 @@ def _meter(limit: str = "1") -> tuple[BudgetService, BudgetMeter]:
     pricing = PricingTable.default(generation_model="gen", lite_model=MODEL)
     svc = BudgetService(store, pricing)
     return svc, svc.meter("sess-1", limit=Decimal(limit), ttl_seconds=60)
+
+
+# --- token overlap (the deterministic engine) ---
+
+
+def test_best_use_case_matches_on_words() -> None:
+    assert best_use_case("I need a professional headshot", USE_CASES) == "headshot"
+    # Multi-word tokens split on the underscore.
+    assert best_use_case("a formal portrait for documents", USE_CASES) == "formal_portrait"
+
+
+def test_best_use_case_no_overlap_is_default() -> None:
+    assert best_use_case("подводный балет", USE_CASES) == FALLBACK_USE_CASE
 
 
 # --- deterministic fallback ---

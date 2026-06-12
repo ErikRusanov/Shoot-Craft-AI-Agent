@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from protocols.brief_parser import BriefParser, ParseResult
 from protocols.budget import BudgetMeter, BudgetReservation
-from protocols.classifier import ClassifyResult, UseCaseClassifier
 from protocols.embedder import Embedder
 from protocols.event_bus import EventBus, StreamedEvent
 from protocols.face_analyzer import DetectedFace, FaceAnalyzer
@@ -29,7 +28,6 @@ __all__ = [
     "BriefParser",
     "BudgetMeter",
     "BudgetReservation",
-    "ClassifyResult",
     "DetectedFace",
     "Embedder",
     "EventBus",
@@ -46,7 +44,6 @@ __all__ = [
     "StateStore",
     "StepPlanner",
     "StreamedEvent",
-    "UseCaseClassifier",
     "WriteRequest",
     "WriteResult",
     "WriterFeedback",
