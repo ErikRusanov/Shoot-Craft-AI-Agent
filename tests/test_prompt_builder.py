@@ -189,7 +189,7 @@ INVENTORY = PhotoInventory(
 
 GENERIC_LOCK = (
     "the person — entire face, every facial feature, expression, eyes, nose, "
-    "mouth, jaw, skin texture and skin tone, hair, and body"
+    "mouth, jaw, skin texture and skin tone, hair, body, and head angle"
 )
 
 # Step 2 of a chain: the background was already replaced (step 1, applied), the
@@ -216,10 +216,10 @@ GOLDEN_EDIT_PROMPT = (
     "LOCKED — the following must be copied exactly from the provided image, unchanged: "
     + GENERIC_LOCK
     + "; the pose: standing square to the camera, hands together at the waist; "
+    "the framing: waist-up, eye-level; "
     "the hands: fingertips touching in a relaxed triangle; "
     "the hair: short wavy light-brown hair; "
     "the facial hair: short beard and moustache; "
-    "the framing: waist-up, eye-level; "
     "the lighting: soft window light from the left; "
     "wedding ring on the right hand; "
     "white earbud in the left ear; "
@@ -227,7 +227,14 @@ GOLDEN_EDIT_PROMPT = (
     "the new dark conference-stage backdrop (already final — keep it exactly)."
     " Do NOT regenerate, repaint, smooth, retouch, denoise or beautify any locked "
     "part — copy it pixel-for-pixel from the input image. Treat the person as "
-    "untouchable."
+    "untouchable. Do NOT reorient the face, head, or gaze — preserve the exact "
+    "head yaw, pitch, and roll from the reference. Never normalize or correct the "
+    "head position toward a more frontal view. Do NOT resize the head, narrow the "
+    "shoulders, or alter the head-to-shoulder width ratio — preserve the exact body "
+    "proportions and shoulder span from the reference image. Exception: if the step "
+    "changes the background or ambient lighting, natural rim light or color spill "
+    "from the new light source may fall on the subject's hair outline, shoulders and "
+    "clothing edges — that is physics, not a change to the person."
     "\n\n"
     "The ONLY change allowed in this edit is: " + STEP2_INSTRUCTION + "."
     "\n\n"

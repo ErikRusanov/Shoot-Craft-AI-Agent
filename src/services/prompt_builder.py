@@ -44,7 +44,7 @@ _LOCK_PREFIX = "These must hold exactly, overriding any conflicting detail above
 # degradation path is generic, not absent).
 _GENERIC_PERSON_LOCK = (
     "the person — entire face, every facial feature, expression, eyes, nose, "
-    "mouth, jaw, skin texture and skin tone, hair, and body"
+    "mouth, jaw, skin texture and skin tone, hair, body, and head angle"
 )
 _LOCKED_PREFIX = (
     "LOCKED — the following must be copied exactly from the provided image, unchanged: "
@@ -52,7 +52,14 @@ _LOCKED_PREFIX = (
 _LOCKED_SUFFIX = (
     " Do NOT regenerate, repaint, smooth, retouch, denoise or beautify any locked "
     "part — copy it pixel-for-pixel from the input image. Treat the person as "
-    "untouchable."
+    "untouchable. Do NOT reorient the face, head, or gaze — preserve the exact "
+    "head yaw, pitch, and roll from the reference. Never normalize or correct the "
+    "head position toward a more frontal view. Do NOT resize the head, narrow the "
+    "shoulders, or alter the head-to-shoulder width ratio — preserve the exact body "
+    "proportions and shoulder span from the reference image. Exception: if the step "
+    "changes the background or ambient lighting, natural rim light or color spill "
+    "from the new light source may fall on the subject's hair outline, shoulders and "
+    "clothing edges — that is physics, not a change to the person."
 )
 _ONLY_CHANGE_PREFIX = "The ONLY change allowed in this edit is: "
 _TEXTURE_BLOCK_HEAD = (
@@ -81,11 +88,13 @@ _APPLIED_SUFFIX = " (already final — keep it exactly)"
 # they sit too close to the identity to ever unlock by keyword.
 _FIELD_LABELS: tuple[tuple[str, str], ...] = (
     ("pose", "the pose"),
+    # Framing (shoulder span, scale, crop) is second — composition drift is as
+    # identity-destructive as pose drift and must be locked early in the list.
+    ("framing", "the framing"),
     ("hands", "the hands"),
     ("clothing", "the clothing"),
     ("hair", "the hair"),
     ("facial_hair", "the facial hair"),
-    ("framing", "the framing"),
     ("lighting", "the lighting"),
     ("background", "the background"),
 )

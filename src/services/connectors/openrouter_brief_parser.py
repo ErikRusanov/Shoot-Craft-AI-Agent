@@ -32,18 +32,26 @@ from services.connectors.openrouter_client import OpenRouterClient, parse_usage
 log = structlog.get_logger(__name__)
 
 _SYSTEM_PROMPT = (
-    "You analyze a user's photo request and return a structured reading. Decide the "
-    "mode: 'edit' when the user wants to keep their existing photo and change only "
-    "specific things (e.g. 'keep my face, replace the background with blue'); "
-    "'generate' when they want a fresh styled photo for a target use case (e.g. a "
-    "headshot, an avatar, a passport photo). For generate, pick the best-fitting "
-    "use_case from the allowed list, or null if none fits; for edit, use_case is "
-    "null. List 'preserve' (what must stay as in the original — pose, framing, "
-    "clothing, setting; the face is always preserved implicitly). List 'changes', "
-    "each a short target noun (background, lighting, clothing, accessory) plus the "
-    "instruction in the user's intent. List 'conflicts': any request that tries to "
-    "edit the person's face or identity itself, or asks for something impossible. "
-    "Never restate the face as a change."
+    "You analyze a user's photo request and return a structured reading.\n"
+    "\n"
+    "Decide the mode. Use 'edit' when the user requests one or more specific changes "
+    "to their existing photo — verbs like 'replace', 'change', 'add', 'remove', "
+    "'swap' applied to background, clothing, accessories, lighting, or setting. "
+    "Use 'generate' only when there are NO specific replacements or additions — the "
+    "user just wants a fresh styled photo for a target use case (e.g. 'make me a "
+    "headshot', 'create an avatar') with no concrete instructions about what to "
+    "change. If the user mentions both a general quality goal ('professional look', "
+    "'studio quality') AND specific changes (replace background, add a chain), "
+    "choose 'edit' — the specific changes drive the mode, the quality goal is style "
+    "context only.\n"
+    "\n"
+    "For generate, pick the best-fitting use_case from the allowed list, or null if "
+    "none fits; for edit, use_case is always null. List 'preserve' (what must stay "
+    "as in the original — pose, framing, clothing, setting; the face is always "
+    "preserved implicitly). List 'changes', each a short target noun (background, "
+    "lighting, clothing, accessory) plus the instruction in the user's intent. List "
+    "'conflicts': any request that tries to edit the person's face or identity "
+    "itself, or asks for something impossible. Never restate the face as a change."
 )
 
 
