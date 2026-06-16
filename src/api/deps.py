@@ -484,6 +484,7 @@ def build_container(settings: Settings) -> Container:
             max_iterations=settings.max_iterations,
             generation_model=settings.generation_model,
             upscale_factor=settings.upscale_factor,
+            enable_enhance_pass=settings.enhance_pass,
         ),
         budget=budget,
         pricing=pricing,

@@ -161,7 +161,7 @@ async def test_full_flow_snapshot_and_terminal_guards(server: tuple[str, Contain
         snapshot = resp.json()
         assert snapshot["state"]["fsm_state"] == "done"
         assert snapshot["state"]["preset_id"] == "default"
-        assert snapshot["generations_spent"] == 1
+        assert snapshot["generations_spent"] == 2  # main iteration + enhance pass
 
         # Terminal: no further drive, in any direction.
         resp = await c.post("/v1/sessions/s1/cancel")

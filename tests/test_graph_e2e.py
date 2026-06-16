@@ -158,6 +158,8 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
             "stage",  # generating
             "iteration_start",
             "iteration_result",
+            "iteration_start",  # enhance pass
+            "iteration_result",  # enhance pass
             "result",
             "done",
         ]
@@ -192,11 +194,12 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
     assert session.plan is not None
     assert session.plan.selected_composition is None
 
-    assert [it.charged for it in session.iterations] == [True]
+    # Main iteration + enhance pass, both charged.
+    assert [it.charged for it in session.iterations] == [True, True]
     assert session.best_result is not None
     assert session.best_result.verdict is Verdict.PASSED
     assert await container.storage.get(session.best_result.result_ref)
-    await assert_generations_charged(container, "s1", 1)
+    await assert_generations_charged(container, "s1", 2)
 
     # Edit-mode session pays the inventory call once.
     face = await container.store.get_face("face-1")
@@ -298,8 +301,8 @@ async def test_crash_between_approve_and_loop_resumes_without_double_pay(
         session = await second.store.get_session("s-crash")
         assert session is not None
         assert session.fsm_state is FsmState.DONE
-        assert [it.charged for it in session.iterations] == [True]
-        await assert_generations_charged(second, "s-crash", 1)
+        assert [it.charged for it in session.iterations] == [True, True]
+        await assert_generations_charged(second, "s-crash", 2)
 
         # Pre-approve nodes did not re-run after the restart: the whole stream
         # carries exactly one face_check stage and one plan.

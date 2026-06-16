@@ -150,6 +150,11 @@ class Settings(BaseSettings):
     # 2 = 2x LANCZOS resize. Complements the model's own output_size tier: even
     # if the API ignores image_size, the stored file is always at least this large.
     upscale_factor: int = 2
+    # Quality-enhancement pass: one extra generation on the best result after the
+    # main step chain, using a minimal positive prompt ("studio quality"). If
+    # face-check on the enhanced image is below floor the pass is discarded and
+    # the pre-enhancement best is delivered unchanged.
+    enhance_pass: bool = True
 
     # --- API hardening / backpressure ---
     # Per-process cap on concurrent upstream generation calls. The semaphore
