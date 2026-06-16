@@ -89,6 +89,18 @@ def resize_max_side(img: Image.Image, max_side: int) -> Image.Image:
     return img.resize(size, Image.Resampling.LANCZOS)
 
 
+def upscale(img: Image.Image, factor: int) -> Image.Image:
+    """Upscale ``img`` by an integer ``factor`` using LANCZOS resampling.
+
+    ``factor <= 1`` returns the image unchanged. Intended as a post-generation
+    step: the generation model outputs a fixed resolution per aspect-ratio tier;
+    this lifts it before storage so downstream consumers always get a larger file.
+    """
+    if factor <= 1:
+        return img
+    return img.resize((img.width * factor, img.height * factor), Image.Resampling.LANCZOS)
+
+
 def grayscale(img: Image.Image) -> NDArray[np.float64]:
     """Luma plane as a float array in 0..255."""
     return np.asarray(img.convert("L"), dtype=np.float64)

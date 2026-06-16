@@ -134,15 +134,20 @@ class Settings(BaseSettings):
     # schema_v 3); 0.5.0 brought preset schema_v 4 (mode, style_notes, slot
     # policy) for the brief-driven writer pipeline; 0.7.0 strengthened the edit
     # preset's frozen blocks with the pixel-for-pixel lock language the core's
-    # edit-mode lock-block assembly pairs with. A prod deploy that pulls an
-    # older package fails fast at startup rather than running a stale contract.
-    # Only enforced for 'package' mode.
-    preset_min_library_version: str = "0.7.0"
+    # edit-mode lock-block assembly pairs with; 0.8.0 dropped the convergence
+    # block (preset schema_v 5) now that budget is spent greedily, not forecast
+    # per-step. A prod deploy that pulls an older package fails fast at startup
+    # rather than running a stale contract. Only enforced for 'package' mode.
+    preset_min_library_version: str = "0.8.0"
 
     # --- Generation loop / budget safety ---
     # budget_limit is supplied per session by the business service; this is only a
     # hard ceiling guarding against a runaway loop.
     max_iterations: int = 8
+    # Post-generation upscale applied before storing the result. 0 = disabled;
+    # 2 = 2x LANCZOS resize. Complements the model's own output_size tier: even
+    # if the API ignores image_size, the stored file is always at least this large.
+    upscale_factor: int = 2
 
     # --- API hardening / backpressure ---
     # Per-process cap on concurrent upstream generation calls. The semaphore
@@ -167,8 +172,6 @@ class Settings(BaseSettings):
     # deploy. Shape mirrors services.pricing.PricingTable (e.g.
     # {"model_rates": {"<model>": {"input_per_mtok": "0.5", ...}}}).
     pricing_overrides_json: str | None = None
-    # Fallback expected paid generations when a preset ships no convergence stats.
-    default_expected_generations: int = 3
 
     @model_validator(mode="after")
     def _check_path_preset(self) -> Settings:

@@ -58,14 +58,12 @@ generation:
   temperature: 0.50
   aspect_ratio: "1:1"
   face_media_resolution: high
+  output_size: "2K"
 
 thresholds:
   similarity_threshold: 0.60  # placeholder; calibrate on real pipeline output
   identity_floor: 0.50  # placeholder
   K_max_retries: 3
-
-convergence:
-  expected_generations: 2  # placeholder; measure on real pipeline output
 
 compositions:
   - id: neutral_grey

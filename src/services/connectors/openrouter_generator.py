@@ -95,7 +95,10 @@ class OpenRouterImageGenerator:
                 "messages": [{"role": "user", "content": content}],
                 "modalities": ["image", "text"],
                 "temperature": params.temperature,
-                "image_config": {"aspect_ratio": params.aspect_ratio},
+                "image_config": {
+                    "aspect_ratio": params.aspect_ratio,
+                    "image_size": params.output_size,
+                },
             }
         )
 

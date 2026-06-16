@@ -50,6 +50,9 @@ class Generation(_Strict):
     aspect_ratio: str
     # The model has no denoise/strength — only these knobs exist.
     face_media_resolution: str
+    # Output resolution tier passed to the image model (e.g. "1K", "2K", "4K").
+    # Defaults to "2K" for better portrait quality; "1K" was the old implicit default.
+    output_size: str = "2K"
 
     @field_validator("temperature")
     @classmethod
@@ -65,25 +68,6 @@ class Thresholds(_Strict):
     K_max_retries: int
 
 
-class ConvergenceProfile(_Strict):
-    """Offline-measured convergence statistics, used only for cost estimation.
-
-    ``expected_generations`` is the mean number of paid generations a session on
-    this preset takes to reach the similarity target — measured on the curated
-    library against real pipeline output, never predicted at runtime. A preset
-    without this block falls back to the config-wide default.
-    """
-
-    expected_generations: int
-
-    @field_validator("expected_generations")
-    @classmethod
-    def _at_least_one(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError(f"expected_generations {v} must be >= 1")
-        return v
-
-
 class Composition(_Strict):
     id: str
     label: str
@@ -97,8 +81,10 @@ class Preset(_Strict):
     # v2: dropped applies_to.age. v3: dropped applies_to.gender — the face comes
     # from the reference, so matching is use_case only. v4: added `mode`,
     # `style_notes` and slot `policy` for the brief-driven writer pipeline;
-    # `prompt_structure` demoted to the no-LLM fallback template.
-    schema_v: int = 4
+    # `prompt_structure` demoted to the no-LLM fallback template. v5: dropped the
+    # `convergence` block — budget is spent greedily (reserve-per-generation), not
+    # forecast from a per-step attempt count.
+    schema_v: int = 5
     id: str
     version: str
     applies_to: AppliesTo
@@ -119,7 +105,6 @@ class Preset(_Strict):
     slots: dict[str, Slot]
     generation: Generation
     thresholds: Thresholds
-    convergence: ConvergenceProfile | None = None
     compositions: list[Composition] = []
     anchor_examples: list[str] = []
 

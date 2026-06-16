@@ -207,6 +207,8 @@ class Plan(StrictModel):
     summary: str
     compositions: list[CompositionChoice] = Field(default_factory=list)
     selected_composition: str | None = None
+    # The plan's floor — one generation per step (zero retries). Spending is
+    # greedy, so the actual count lands between this and the budget ceiling.
     planned_generations: int
     # The ordered edit/generation steps the user approves. Empty for a legacy
     # single-shot plan; a generate-mode plan carries exactly one step.
@@ -216,13 +218,15 @@ class Plan(StrictModel):
 class CostEstimate(StrictModel):
     """Paid-spend forecast for the plan, in real USD.
 
-    ``budget_limit`` is the per-session dollar ceiling from the business service;
-    ``generations`` is how many paid generations the plan expects to fit under
-    it — bounded by what the *padded* reservation actually admits, so the plan
-    never promises a generation the runtime would refuse. ``per_generation_cost``
-    is the realistic (unpadded) price of one generation, ``llm_overhead_cost``
-    the auxiliary LLM spend (slot fill, classification), and ``total_cost`` their
-    sum. All ``Decimal`` so the money arithmetic stays exact.
+    Spending is greedy pay-as-you-go, so the plan is never trimmed to fit:
+    ``generations`` is the **floor** — one generation per step, the best case with
+    zero retries — and ``total_cost`` is the full ``budget_limit`` the session may
+    consume. ``budget_limit`` is the per-session dollar ceiling from the business
+    service; ``per_generation_cost`` is the realistic (unpadded) price of one
+    generation; ``llm_overhead_cost`` the auxiliary LLM spend (slot fill,
+    classification). ``note`` carries the budget ceiling (generations the padded
+    reservation admits, retries included), flagging an under-funded chain as
+    "may ship partial". All ``Decimal`` so the money arithmetic stays exact.
     """
 
     generations: int
@@ -230,6 +234,9 @@ class CostEstimate(StrictModel):
     per_generation_cost: Decimal = Decimal("0")
     llm_overhead_cost: Decimal = Decimal("0")
     total_cost: Decimal = Decimal("0")
+    # Optimistic lower bound: floor * per_generation_cost + llm_overhead_cost
+    # (zero retries, best case). Use this to display "you need at least $X".
+    minimum_cost: Decimal = Decimal("0")
     note: str | None = None
 
 

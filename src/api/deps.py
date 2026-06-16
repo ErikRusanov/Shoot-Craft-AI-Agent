@@ -485,11 +485,11 @@ def build_container(settings: Settings) -> Container:
             face_ttl_seconds=settings.face_ttl_seconds,
             max_iterations=settings.max_iterations,
             generation_model=settings.generation_model,
+            upscale_factor=settings.upscale_factor,
         ),
         budget=budget,
         pricing=pricing,
         generation_model=settings.generation_model,
-        default_expected_generations=settings.default_expected_generations,
         session_ttl_seconds=settings.session_ttl_seconds,
         face_ttl_seconds=settings.face_ttl_seconds,
     )

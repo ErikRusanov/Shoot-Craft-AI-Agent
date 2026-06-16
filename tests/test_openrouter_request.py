@@ -75,7 +75,7 @@ async def test_request_shape(params: Generation) -> None:
     assert body["model"] == MODEL
     assert body["modalities"] == ["image", "text"]
     assert body["temperature"] == params.temperature
-    assert body["image_config"] == {"aspect_ratio": "4:5"}
+    assert body["image_config"] == {"aspect_ratio": "4:5", "image_size": "2K"}
 
     content = body["messages"][0]["content"]
     # Text first (OpenRouter's recommended order), then refs, face crop last.
