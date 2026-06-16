@@ -136,10 +136,10 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
             assert approval["slot"] == "approve"
 
             plan = json.loads(next(f for f in seen if f.event == "plan").data)["plan"]
-            assert plan["planned_generations"] == 1
+            assert plan["planned_generations"] == 2
             assert [c["id"] for c in plan["compositions"]] == ["studio_neutral"]
             cost = json.loads(next(f for f in seen if f.event == "cost").data)["cost"]
-            assert cost["generations"] == 1
+            assert cost["generations"] == 2
             # Decimal USD on the 6-dp grid, serialized as a string.
             assert cost["budget_limit"] == "4.000000"
 
@@ -156,10 +156,14 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
             "cost",
             "need_input",  # approve
             "stage",  # generating
+            "step_started",  # step 1: main generation
             "iteration_start",
             "iteration_result",
-            "iteration_start",  # enhance pass
-            "iteration_result",  # enhance pass
+            "step_result",  # step 1 done
+            "step_started",  # step 2: enhance
+            "iteration_start",
+            "iteration_result",
+            "step_result",  # step 2 done
             "result",
             "done",
         ]

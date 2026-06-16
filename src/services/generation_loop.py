@@ -154,7 +154,6 @@ class GenerationLoop:
         max_iterations: int,
         generation_model: str,
         upscale_factor: int = 0,
-        enable_enhance_pass: bool = False,
     ) -> None:
         self._store = store
         self._storage = storage
@@ -167,7 +166,6 @@ class GenerationLoop:
         self._idempotency = idempotency
         self._session_ttl = session_ttl_seconds
         self._upscale_factor = upscale_factor
-        self._enable_enhance_pass = enable_enhance_pass
         self._face_ttl = face_ttl_seconds
         self._max_iterations = max_iterations
         self._generation_model = generation_model
@@ -333,19 +331,6 @@ class GenerationLoop:
             if outcome.budget_exhausted:
                 break
 
-        if self._enable_enhance_pass and session.best_result is not None:
-            await self._run_enhance_pass(
-                session=session,
-                face=face,
-                preset=preset,
-                thresholds=thresholds,
-                meter=meter,
-                input_bytes=working,
-                face_crop=face_crop,
-                preset_meta=preset_meta,
-                aspect_ratio=aspect_ratio,
-            )
-
         return await self._finish(session, failure_reason, failure_code)
 
     def _plan_steps(self, session: SessionState, preset: Preset) -> list[EditStep]:
@@ -380,29 +365,41 @@ class GenerationLoop:
     ) -> _StepOutcome:
         """Run the retry cycle for one step against ``working_image``."""
         session_key = session.session_key
-        request = self._write_request(
-            preset,
-            step,
-            preserve,
-            locked,
-            defaults,
-            addendum,
-            session.slots,
-            inventory=face.inventory,
-            applied=applied,
-        )
         lighting = face.inventory.lighting.strip() if face.inventory is not None else None
-        base = await self._writer.compose(request, photo_metrics=face.metrics, meter=meter)
-        await self._record_writer_cost(session, base)
-        base_built = self._assemble(
-            preset,
-            base.body,
-            step=step,
-            locked=locked,
-            lock_items=lock_items,
-            lighting=lighting,
-        )
-        prev_body = base.body
+
+        # Enhance steps skip the writer entirely: a short positive body
+        # ("studio quality") is more effective than a long locked-attribute
+        # list — the latter suppresses the change signal so hard the model
+        # produces no visible improvement.
+        request: WriteRequest | None
+        if step.is_enhance:
+            base_built = assemble_prompt(preset, _ENHANCE_BODY)
+            prev_body = ""
+            request = None
+        else:
+            request = self._write_request(
+                preset,
+                step,
+                preserve,
+                locked,
+                defaults,
+                addendum,
+                session.slots,
+                inventory=face.inventory,
+                applied=applied,
+            )
+            base = await self._writer.compose(request, photo_metrics=face.metrics, meter=meter)
+            await self._record_writer_cost(session, base)
+            base_built = self._assemble(
+                preset,
+                base.body,
+                step=step,
+                locked=locked,
+                lock_items=lock_items,
+                lighting=lighting,
+            )
+            prev_body = base.body
+
         base_temperature = base_built.params.temperature
 
         max_attempts = min(1 + thresholds.K_max_retries, self._max_iterations)
@@ -415,17 +412,24 @@ class GenerationLoop:
             retrying = attempt > 1
             n = len(session.iterations) + 1
             if retrying:
-                revised = await self._writer.revise(prev_body, last, request=request, meter=meter)
-                await self._record_writer_cost(session, revised)
-                prev_body = revised.body
-                built = self._assemble(
-                    preset,
-                    revised.body,
-                    step=step,
-                    locked=locked,
-                    lock_items=lock_items,
-                    lighting=lighting,
-                )
+                if step.is_enhance:
+                    # Fixed body — no revision possible; temperature still decays.
+                    built = base_built
+                else:
+                    assert request is not None
+                    revised = await self._writer.revise(
+                        prev_body, last, request=request, meter=meter
+                    )
+                    await self._record_writer_cost(session, revised)
+                    prev_body = revised.body
+                    built = self._assemble(
+                        preset,
+                        revised.body,
+                        step=step,
+                        locked=locked,
+                        lock_items=lock_items,
+                        lighting=lighting,
+                    )
                 params = base_built.params.model_copy(
                     update={"temperature": base_temperature * _TEMPERATURE_DECAY ** (attempt - 1)}
                 )
@@ -614,171 +618,6 @@ class GenerationLoop:
                 )
 
         return _StepOutcome(step_best, step_best_bytes, failure_reason, failure_code, False)
-
-    async def _run_enhance_pass(
-        self,
-        *,
-        session: SessionState,
-        face: FaceProfile,
-        preset: Preset,
-        thresholds: Thresholds,
-        meter: BudgetMeter,
-        input_bytes: bytes,
-        face_crop: bytes | None,
-        preset_meta: dict[str, str | None],
-        aspect_ratio: str | None,
-    ) -> None:
-        """Quality-enhancement pass on the best result. Updates session in place.
-
-        One generation with a short positive prompt; the identity_instruction
-        (frozen, first) plus the external face-check are the identity guards.
-        If the enhanced image is below the identity floor the pass is a no-op:
-        the pre-enhance best is delivered unchanged.
-        """
-        session_key = session.session_key
-        n = len(session.iterations) + 1
-
-        built = assemble_prompt(preset, _ENHANCE_BODY)
-        params = built.params
-        if aspect_ratio is not None:
-            params = params.model_copy(update={"aspect_ratio": aspect_ratio})
-
-        reservation = await meter.reserve(
-            PaidCallKind.GENERATION, estimate=self._reserve_estimate(built, send_crop=face_crop)
-        )
-        if reservation is None:
-            logger.info("generation_loop.enhance_budget_exhausted", session_key=session_key)
-            return
-
-        await self._bus.publish(session_key, IterationStartEvent(n=n))
-
-        try:
-            generated = await self._generator.generate(
-                prompt=built.text,
-                params=params,
-                reference_images=[input_bytes],
-                face_crop=face_crop,
-            )
-        except GenerationRefusedError as exc:
-            cost = await reservation.settle(_usage_cost(exc.usage))
-            charged = cost > Decimal("0")
-            session.iterations.append(
-                Iteration(
-                    n=n,
-                    step_n=0,
-                    prompt_hash=built.prompt_hash,
-                    prompt_text=built.text,
-                    charged=charged,
-                    cost=cost,
-                    usage=exc.usage,
-                    error=f"enhance refused: {exc}",
-                )
-            )
-            await self._checkpoint(session)
-            await self._bus.publish(
-                session_key,
-                IterationResultEvent(
-                    n=n, charged=charged, cost=cost, error=str(exc), **preset_meta
-                ),
-            )
-            return
-        except Exception as exc:
-            await reservation.cancel()
-            logger.warning(
-                "generation_loop.enhance_failed", session_key=session_key, error=str(exc)
-            )
-            return
-
-        cost = await reservation.settle(_usage_cost(generated.usage))
-        result_bytes = generated.image_bytes
-        if self._upscale_factor > 1:
-            result_bytes = encode_jpeg(upscale(decode_rgb(result_bytes), self._upscale_factor))
-        result_ref = await self._storage.put(_result_ref(session_key, n), result_bytes)
-        iteration = Iteration(
-            n=n,
-            step_n=0,
-            prompt_hash=built.prompt_hash,
-            prompt_text=built.text,
-            provider_request_id=generated.provider_request_id,
-            result_ref=result_ref,
-            charged=cost > Decimal("0"),
-            cost=cost,
-            usage=generated.usage,
-        )
-        session.iterations.append(iteration)
-        await self._checkpoint(session)
-
-        try:
-            check = await self._facecheck.check(
-                reference_embedding=face.embedding,
-                image=generated.image_bytes,
-                thresholds=thresholds,
-            )
-        except Exception as exc:
-            iteration.error = f"face-check failed: {exc}"
-            await self._checkpoint(session)
-            logger.warning(
-                "generation_loop.enhance_facecheck_failed",
-                session_key=session_key,
-                error=str(exc),
-            )
-            await self._bus.publish(
-                session_key,
-                IterationResultEvent(
-                    n=n,
-                    charged=iteration.charged,
-                    cost=iteration.cost,
-                    result_ref=result_ref,
-                    error=str(exc),
-                    **preset_meta,
-                ),
-            )
-            return
-
-        iteration.similarity = check.similarity
-        iteration.verdict = check.verdict
-        iteration.risk_level = check.risk_level
-        self._track_convergence(face, check.similarity)
-        await self._checkpoint(session)
-        await self._store.put_face(face, ttl_seconds=self._face_ttl)
-
-        await self._bus.publish(
-            session_key,
-            IterationResultEvent(
-                n=n,
-                similarity=check.similarity,
-                verdict=check.verdict,
-                risk_level=check.risk_level,
-                charged=iteration.charged,
-                cost=iteration.cost,
-                result_ref=result_ref,
-                **preset_meta,
-            ),
-        )
-        logger.info(
-            "generation_loop.enhance",
-            session_key=session_key,
-            n=n,
-            similarity=round(check.similarity, 4),
-            verdict=check.verdict,
-        )
-
-        if check.verdict is Verdict.BELOW_FLOOR:
-            logger.info(
-                "generation_loop.enhance_discarded",
-                session_key=session_key,
-                reason="identity below floor",
-            )
-            return
-
-        session.best_result = BestResult(
-            iteration_n=n,
-            result_ref=result_ref,
-            similarity=check.similarity,
-            verdict=check.verdict,
-            risk_level=check.risk_level,
-        )
-        await self._checkpoint(session)
 
     def _assemble(
         self,

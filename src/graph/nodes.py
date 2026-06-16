@@ -431,6 +431,20 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
                 )
             )
 
+        # When there are no explicit edit steps the loop would silently fall
+        # back to an untracked synthetic step — make it explicit so the plan
+        # always has at least one main generation the enhance step follows.
+        if not steps:
+            steps = [EditStep(n=1, title=preset.id, instruction="", targets=[])]
+
+        # Quality-enhancement step is always last: one generation that
+        # sharpens detail and reduces noise without touching identity. Placing
+        # it in the plan makes it visible in cost estimates and step events.
+        enhance = EditStep(
+            n=len(steps) + 1, title="enhance", instruction="", targets=[], is_enhance=True
+        )
+        steps = [*steps, enhance]
+
         cost = estimate_cost(
             preset,
             budget_limit=budget_limit,

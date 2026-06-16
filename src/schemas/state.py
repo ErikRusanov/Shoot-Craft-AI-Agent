@@ -199,6 +199,10 @@ class EditStep(StrictModel):
     applied: str = ""
     status: StepStatus = "pending"
     result_ref: str | None = None
+    # Marks the quality-enhancement step appended at the end of every plan.
+    # The loop skips the prompt writer for enhance steps and uses a fixed
+    # positive-only body instead of the locked-attribute edit prompt.
+    is_enhance: bool = False
 
 
 class Plan(StrictModel):
