@@ -56,18 +56,15 @@ class IngestPhotoResponse(SchemaModel):
 class StartSessionRequest(SchemaModel):
     """Open a session for an accepted ``face_key``.
 
-    Preset matching keys on ``use_case`` only — the face comes from the
-    reference, so neither gender nor any demographic is a contract input. Both
-    ``use_case`` and ``brief`` are optional: the business service often has only
-    the user's free-text request. When ``use_case`` is absent the core classifies
-    one from ``brief`` (falling back to the reserved ``default`` preset, whose
-    free-form scene is filled from ``brief``). ``budget_limit`` is the USD ceiling
-    for this session (pay-as-you-go).
+    ``brief`` is the user's own free-text request; ``budget_limit`` is the USD
+    ceiling for this session (pay-as-you-go). The core always works in edit mode:
+    it reads the brief, extracts changes, and applies them to the reference photo.
+    The preset falls back to the library's reserved ``default`` when no curated
+    preset matches the brief.
     """
 
     schema_v: int = 2
     face_key: str
-    use_case: str | None = None
     brief: str | None = None  # the user's own free-text request
     budget_limit: Decimal  # USD ceiling for this session (pay-as-you-go)
     idem_key: str

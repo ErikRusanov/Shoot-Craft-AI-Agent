@@ -188,7 +188,6 @@ class SessionRunner:
         session_key: str,
         *,
         face_key: str,
-        use_case: str,
         brief: str,
         budget_limit: Decimal,
     ) -> bool:
@@ -202,7 +201,6 @@ class SessionRunner:
             initial_state(
                 session_key=session_key,
                 face_key=face_key,
-                use_case=use_case,
                 brief=brief,
                 budget_limit=to_micro(budget_limit),
             ),

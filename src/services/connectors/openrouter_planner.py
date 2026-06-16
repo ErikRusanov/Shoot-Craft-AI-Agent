@@ -161,8 +161,8 @@ class OpenRouterStepPlanner(StepPlanner):
         inventory: PhotoInventory | None = None,
         meter: BudgetMeter | None = None,
     ) -> PlanResult:
-        if analysis.mode == "generate" or len(analysis.changes) < 2:
-            # Nothing to decide — the deterministic single/one-step plan, free.
+        if len(analysis.changes) < 2:
+            # Nothing to merge — one-step deterministic plan, free.
             return await self._fallback.plan(analysis=analysis)
         # Reserve before the paid call; a refused budget degrades to the
         # deterministic plan rather than failing the session.

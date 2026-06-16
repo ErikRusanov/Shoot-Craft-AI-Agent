@@ -142,11 +142,12 @@ def _plan_summary(
     slots: dict[str, str],
     budget_note: str | None,
 ) -> str:
-    """Human-readable plan: the ordered steps (edit) or the styled target (generate)."""
-    if analysis.mode == "edit" and steps:
-        body = "; ".join(f"{s.n}. {s.title}: {s.instruction}" for s in steps)
-    else:
-        body = ", ".join(f"{name}={value}" for name, value in sorted(slots.items()))
+    """Human-readable plan: the ordered edit steps."""
+    body = (
+        "; ".join(f"{s.n}. {s.title}: {s.instruction}" for s in steps)
+        if steps
+        else ", ".join(f"{name}={value}" for name, value in sorted(slots.items()))
+    )
     summary = f"{preset.id} v{preset.version}: {body}"
     if analysis.conflicts:
         summary += " | conflicts (locked attributes win): " + "; ".join(analysis.conflicts)
@@ -234,13 +235,11 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         return {}
 
     async def parse_brief(state: GraphState) -> dict[str, Any]:
-        """Read the brief into a :class:`BriefAnalysis` — mode, preserve-list,
-        changes, conflicts — replacing the lone use-case token.
-
-        A budgeted LLM call with a free deterministic fallback (it never fails):
-        a caller-supplied ``use_case`` steers a target-driven generate; otherwise
-        the parser decides edit vs generate and picks the ``use_case``. The
-        analysis is stored on the session; resolution and planning read it there.
+        """Read the brief into a :class:`BriefAnalysis` — preserve-list, changes,
+        conflicts. A budgeted LLM call with a free deterministic fallback (it never
+        fails). The analysis is stored on the session; resolution and planning read
+        it there. Always edit mode: the brief drives delta changes on the reference
+        photo.
         """
         meter = svc.budget.meter(
             state["session_key"],
@@ -249,8 +248,6 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         )
         result = await svc.brief_parser.parse(
             brief=state.get("brief", ""),
-            use_case=state["use_case"] or None,
-            use_cases=svc.library.use_case_tokens,
             meter=meter,
         )
         session = await _session(state["session_key"])
@@ -260,21 +257,18 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
                 PaidCallRecord(kind=PaidCallKind.CLASSIFY, cost=result.cost, usage=result.usage)
             )
         await _checkpoint(session)
-        # Empty use_case (an edit) resolves to the fallback edit preset.
         return {"use_case": result.analysis.use_case or ""}
 
     async def extract_inventory(state: GraphState) -> dict[str, Any]:
         """Catalogue the reference photo for edit-mode prompts — once per photo.
 
-        Edit mode only: a generate-mode session never pays the VLM call. A
-        profile that already carries an inventory (an earlier session on the
+        A profile that already carries an inventory (an earlier session on the
         same photo) is reused as-is. An empty extraction (the fallback) is not
         stored, so a transient failure retries on the next session instead of
         freezing emptiness for the profile's whole TTL.
         """
         session = await _session(state["session_key"])
-        analysis = session.brief_analysis
-        if analysis is None or analysis.mode != "edit":
+        if session.brief_analysis is None:
             return {}
         face = await svc.store.get_face(state["face_key"])
         if face is None or face.inventory is not None:
@@ -376,7 +370,7 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
             }
 
         session = await _session(session_key)
-        analysis = session.brief_analysis or BriefAnalysis(mode="generate", use_case=preset.id)
+        analysis = session.brief_analysis or BriefAnalysis(use_case=preset.id)
         analysis = analysis.model_copy(
             update={"conflicts": [*analysis.conflicts, *_locked_conflicts(preset, analysis)]}
         )
@@ -418,7 +412,7 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         preset = _resolve(state)
         budget_limit = from_micro(state["budget_limit"])
         session = await _session(session_key)
-        analysis = session.brief_analysis or BriefAnalysis(mode="generate", use_case=preset.id)
+        analysis = session.brief_analysis or BriefAnalysis(use_case=preset.id)
 
         meter = svc.budget.meter(
             session_key, limit=budget_limit, ttl_seconds=svc.session_ttl_seconds

@@ -3,15 +3,12 @@
 Replaces the single use-case token the classifier used to collapse a brief into.
 A brief carries two things that token threw away: what must be **preserved** (the
 user said "keep X as is") and what must **change** (the deltas, "make Y blue").
-Those drive the whole pipeline — mode selection, preset constraints, the step
-plan — so they are first-class state, not re-derived downstream.
+Those drive the whole pipeline — preset constraints, the step plan — so they are
+first-class state, not re-derived downstream.
 
-``mode`` is the fundamental fork:
-
-- ``edit`` — delta-driven. Start from the user's photo, apply only the named
-  changes, keep everything else ("keep my face, replace the background").
-- ``generate`` — target-driven. Compose a fresh image toward a described target
-  (a curated preset's job: a headshot, an avatar).
+The pipeline is always **edit-mode**: start from the user's photo, apply only the
+named changes, keep everything else. ``use_case`` is retained as an informational
+field for tracing; it is never operational.
 
 ``conflicts`` are asks that contradict a locked preset attribute or try to edit
 the face/identity; they are surfaced to the user, **never** silently dropped.
@@ -45,9 +42,8 @@ class BriefAnalysis(SchemaModel):
     """
 
     schema_v: int = 1
-    # edit = delta-driven on the user's photo; generate = target-driven compose.
-    mode: Literal["edit", "generate"]
-    use_case: str | None = None
+    mode: Literal["edit"] = "edit"
+    use_case: str | None = None  # informational/tracing only, not operational
     # What stays put — face is always implied, but the user may pin pose,
     # framing, clothing, setting. Surfaced to the writer as the preserve-list.
     preserve: list[str] = Field(default_factory=list)

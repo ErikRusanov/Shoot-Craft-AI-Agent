@@ -1,24 +1,22 @@
 """LLM-backed :class:`~protocols.brief_parser.BriefParser` via a cheap model.
 
 Reads the user's free-text request into a :class:`BriefAnalysis` with structured
-output (``response_format: json_schema``, ``strict``): the mode fork
-(edit/generate), what to preserve, the changes (target + instruction each), the
-conflicts, and the chosen ``use_case`` for a generate-mode curated preset.
+output (``response_format: json_schema``, ``strict``): what to preserve, the
+changes (target + instruction each), and the conflicts. Mode is always ``edit``.
 
 Its authority is exactly the port's: analyze the request, nothing else — it never
 sees preset content, prompts or identity blocks, and its output is re-validated
 here. Failure policy mirrors the classifier and slot filler: any misbehavior —
-budget refusal, transport failure, a 4xx, unparseable output, an out-of-vocabulary
-use_case — degrades to the deterministic
-:class:`~services.brief_parser.DeterministicBriefParser` instead of raising. The
-session must never fail because parsing did. The parse reserves a ``CLASSIFY``
-slot (it replaces that call), so pricing and the budget already cover it.
+budget refusal, transport failure, a 4xx, unparseable output — degrades to the
+deterministic :class:`~services.brief_parser.DeterministicBriefParser` instead of
+raising. The session must never fail because parsing did. The parse reserves a
+``CLASSIFY`` slot (it replaces that call), so pricing and the budget already
+cover it.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from typing import Any
 
 import structlog
@@ -32,26 +30,23 @@ from services.connectors.openrouter_client import OpenRouterClient, parse_usage
 log = structlog.get_logger(__name__)
 
 _SYSTEM_PROMPT = (
-    "You analyze a user's photo request and return a structured reading.\n"
+    "You analyze a user's photo-editing request and return a structured reading.\n"
     "\n"
-    "Decide the mode. Use 'edit' when the user requests one or more specific changes "
-    "to their existing photo — verbs like 'replace', 'change', 'add', 'remove', "
-    "'swap' applied to background, clothing, accessories, lighting, or setting. "
-    "Use 'generate' only when there are NO specific replacements or additions — the "
-    "user just wants a fresh styled photo for a target use case (e.g. 'make me a "
-    "headshot', 'create an avatar') with no concrete instructions about what to "
-    "change. If the user mentions both a general quality goal ('professional look', "
-    "'studio quality') AND specific changes (replace background, add a chain), "
-    "choose 'edit' — the specific changes drive the mode, the quality goal is style "
-    "context only.\n"
+    "The pipeline always works in edit mode — the user's own photo is the starting "
+    "point and only the named changes are applied. Your job is to extract:\n"
     "\n"
-    "For generate, pick the best-fitting use_case from the allowed list, or null if "
-    "none fits; for edit, use_case is always null. List 'preserve' (what must stay "
-    "as in the original — pose, framing, clothing, setting; the face is always "
-    "preserved implicitly). List 'changes', each a short target noun (background, "
-    "lighting, clothing, accessory) plus the instruction in the user's intent. List "
-    "'conflicts': any request that tries to edit the person's face or identity "
-    "itself, or asks for something impossible. Never restate the face as a change."
+    "- 'preserve': what must stay exactly as in the original photo — pose, framing, "
+    "clothing, setting; the face is always preserved implicitly so never list it.\n"
+    "- 'changes': each a short target noun (background, lighting, clothing, accessory, "
+    "color_grade) plus the instruction in the user's own intent. Use one change per "
+    "distinct region — do not merge unrelated targets.\n"
+    "- 'conflicts': any request that tries to edit the person's face or identity "
+    "itself, or asks for something impossible. Never restate the face as a change.\n"
+    "\n"
+    "If the user mentions a general quality goal ('professional look', 'studio "
+    "quality') AND specific changes, include the specific changes and treat the "
+    "quality goal as style context in 'preserve'. Never invent changes the user did "
+    "not ask for."
 )
 
 
@@ -63,8 +58,6 @@ def _response_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "mode": {"type": "string", "enum": ["edit", "generate"]},
-            "use_case": {"type": ["string", "null"]},
             "preserve": {"type": "array", "items": {"type": "string"}},
             "changes": {
                 "type": "array",
@@ -80,7 +73,7 @@ def _response_schema() -> dict[str, Any]:
             },
             "conflicts": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["mode", "use_case", "preserve", "changes", "conflicts"],
+        "required": ["preserve", "changes", "conflicts"],
         "additionalProperties": False,
     }
 
@@ -91,7 +84,7 @@ def _str_list(raw: object, field: str) -> list[str]:
     return [x.strip() for x in raw if x.strip()]
 
 
-def _parse_analysis(body: dict[str, Any], allowed: set[str]) -> BriefAnalysis:
+def _parse_analysis(body: dict[str, Any]) -> BriefAnalysis:
     try:
         content = body["choices"][0]["message"]["content"]
         parsed = json.loads(content)
@@ -99,17 +92,6 @@ def _parse_analysis(body: dict[str, Any], allowed: set[str]) -> BriefAnalysis:
         raise _InvalidAnalysis(f"unparseable parser response: {exc!r}") from exc
     if not isinstance(parsed, dict):
         raise _InvalidAnalysis("parser response is not an object")
-
-    mode = parsed.get("mode")
-    if mode not in {"edit", "generate"}:
-        raise _InvalidAnalysis(f"mode {mode!r} is not edit/generate")
-
-    use_case = parsed.get("use_case")
-    if use_case is not None:
-        if not isinstance(use_case, str) or use_case not in allowed:
-            raise _InvalidAnalysis("use_case is outside the curated vocabulary")
-    if mode == "edit":
-        use_case = None  # an edit never targets a curated use case
 
     raw_changes = parsed.get("changes")
     if not isinstance(raw_changes, list):
@@ -125,8 +107,6 @@ def _parse_analysis(body: dict[str, Any], allowed: set[str]) -> BriefAnalysis:
             changes.append(Change(target=target.strip(), instruction=instruction.strip()))
 
     return BriefAnalysis(
-        mode=mode,
-        use_case=use_case,
         preserve=_str_list(parsed.get("preserve"), "preserve"),
         changes=changes,
         conflicts=_str_list(parsed.get("conflicts"), "conflicts"),
@@ -151,22 +131,20 @@ class OpenRouterBriefParser(BriefParser):
         self,
         *,
         brief: str,
-        use_case: str | None,
-        use_cases: Sequence[str],
         meter: BudgetMeter | None = None,
     ) -> ParseResult:
         if not brief.strip():
             # Nothing to analyze — the deterministic parse covers it for free.
-            return await self._fallback.parse(brief=brief, use_case=use_case, use_cases=use_cases)
+            return await self._fallback.parse(brief=brief)
         # Reserve before the paid call; a refused budget degrades to the free
         # deterministic parse rather than failing the session.
         reservation = None if meter is None else await meter.reserve(PaidCallKind.CLASSIFY)
         if meter is not None and reservation is None:
             log.warning("brief_parser_budget_exhausted")
-            return await self._fallback.parse(brief=brief, use_case=use_case, use_cases=use_cases)
+            return await self._fallback.parse(brief=brief)
         try:
-            body = await self._client.chat_completion(self._payload(brief, use_case, use_cases))
-            analysis = _parse_analysis(body, set(use_cases))
+            body = await self._client.chat_completion(self._payload(brief))
+            analysis = _parse_analysis(body)
             usage = parse_usage(body)
             if reservation is None:
                 return ParseResult(analysis=analysis)
@@ -179,21 +157,14 @@ class OpenRouterBriefParser(BriefParser):
             if reservation is not None:
                 await reservation.cancel()
             log.warning("brief_parser_llm_fallback", error=repr(exc))
-            return await self._fallback.parse(brief=brief, use_case=use_case, use_cases=use_cases)
+            return await self._fallback.parse(brief=brief)
 
-    def _payload(
-        self, brief: str, use_case: str | None, use_cases: Sequence[str]
-    ) -> dict[str, Any]:
-        user_message = {
-            "allowed_use_cases": list(use_cases),
-            "known_use_case": use_case,
-            "request": brief,
-        }
+    def _payload(self, brief: str) -> dict[str, Any]:
         return {
             "model": self._model,
             "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(user_message, ensure_ascii=False)},
+                {"role": "user", "content": json.dumps({"request": brief}, ensure_ascii=False)},
             ],
             "temperature": 0.0,
             "response_format": {

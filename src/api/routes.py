@@ -50,7 +50,6 @@ from schemas import (
     StartSessionResponse,
     Verdict,
 )
-from services.classifier import FALLBACK_USE_CASE
 from services.vision import face_crop_ref, photo_ref
 
 router = APIRouter(prefix="/v1/sessions")
@@ -178,30 +177,23 @@ async def start_session(
                 status_code=422,
                 detail=f"face_key {body.face_key!r} did not pass the quality gate; re-ingest",
             )
-        # With a use_case the preset (and its id) are known up front; without one
-        # the classify node picks it from the brief, so the response can only
-        # confirm a run will start (a fallback exists), not which preset yet.
-        preset = (
-            container.library.resolve(use_case=body.use_case)
-            if body.use_case
-            else container.library.fallback
-        )
+        # The preset is selected by the parse_brief node from the brief; we can
+        # only confirm whether a fallback exists (no preset and no fallback →
+        # the spawned run will fail immediately on the stream).
+        fallback = container.library.fallback
         started = await container.runner.start(
             session_key,
             face_key=body.face_key,
-            use_case=body.use_case or "",
             brief=body.brief or "",
             budget_limit=body.budget_limit,
         )
         if not started:
             raise HTTPException(status_code=409, detail="a run for this session is in flight")
-        # No preset and no fallback: the spawned run fails the session on the
-        # stream; the response says so up front.
         return StartSessionResponse(
             session_key=session_key,
-            fsm_state=FsmState.CREATED if preset is not None else FsmState.FAILED,
-            matched=preset is not None,
-            preset_id=preset.id if (body.use_case and preset is not None) else None,
+            fsm_state=FsmState.CREATED if fallback is not None else FsmState.FAILED,
+            matched=fallback is not None,
+            preset_id=None,
         )
 
     return await _idempotent(container, "start", body.idem_key, StartSessionResponse, op)
@@ -303,7 +295,7 @@ def _preset_summary(preset: Preset) -> PresetSummary:
         id=preset.id,
         version=preset.version,
         use_case_tokens=list(preset.applies_to.use_case),
-        is_fallback=preset.id == FALLBACK_USE_CASE,
+        is_fallback=preset.id == "default",
         asks=asks,
     )
 

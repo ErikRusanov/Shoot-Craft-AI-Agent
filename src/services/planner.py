@@ -1,11 +1,9 @@
 """Deterministic step planner — the no-LLM fallback behind the StepPlanner port.
 
-The deterministic plan is the simplest faithful one: a generate-mode brief is a
-single step; an edit-mode brief is one step per change, ordered from scene-level
-changes toward face-adjacent ones (identity drift compounds along the chain, so
-the risky edits run last, on a frame that already converged). No merging — that
-judgment is the LLM planner's; this is the stable baseline the pipeline
-degrades to.
+One step per change, ordered from scene-level changes toward face-adjacent ones
+(identity drift compounds along the chain, so the risky edits run last, on a
+frame that already converged). No merging — that judgment is the LLM planner's;
+this is the stable baseline the pipeline degrades to.
 
 The plan is **not** trimmed to the budget: under greedy pay-as-you-go the runtime
 reserves before each generation and stops cleanly when the next one would overdraw,
@@ -78,21 +76,7 @@ def _rank(change: Change) -> int:
 
 
 def deterministic_steps(analysis: BriefAnalysis) -> list[EditStep]:
-    """One change = one step (edit, scene-first order); a single step (generate)."""
-    if analysis.mode == "generate":
-        instruction = "; ".join(c.instruction for c in analysis.changes)
-        if not instruction:
-            instruction = (
-                f"a {analysis.use_case} photo" if analysis.use_case else "a styled portrait"
-            )
-        return [
-            EditStep(
-                n=1,
-                title=analysis.use_case or "generate",
-                instruction=instruction,
-                targets=[c.target for c in analysis.changes],
-            )
-        ]
+    """One change = one step, ordered scene-first → face-adjacent last."""
     ordered = sorted(analysis.changes, key=_rank)
     return [
         EditStep(n=i, title=c.target, instruction=c.instruction, targets=[c.target])

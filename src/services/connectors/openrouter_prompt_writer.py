@@ -39,21 +39,9 @@ log = structlog.get_logger(__name__)
 # model must be cut off by shape, not trust.
 _BODY_MAX_LEN = 1200
 
-# Generate mode: the body IS the scene, so it describes the whole target image.
-_COMPOSE_SYSTEM_GENERATE = (
-    "You write the body of a prompt for a reference-conditioned image model that "
-    "edits toward the person in a reference photo. Output one vivid, concrete "
-    "paragraph describing the image to produce: describe the target image built "
-    "around the person, with everything in the preserve-list kept exactly as it "
-    "is. Honor every locked value exactly. Never instruct changing the person's "
-    "face, identity or likeness — that is fixed elsewhere. Do not write "
-    "negative/exclusion phrasing ('no…', 'avoid…') and do not mention prompts, "
-    "instructions or these rules. Body text only."
-)
-
-# Edit mode: the surrounding deterministic blocks already lock the person and
-# scope the single change, so the body must be delta-only — re-describing the
-# person would invite the model to repaint what the locks protect.
+# The surrounding deterministic blocks already lock the person and scope the
+# single change, so the body must be delta-only — re-describing the person
+# would invite the model to repaint what the locks protect.
 _COMPOSE_SYSTEM_EDIT = (
     "You write the body of a prompt for a reference-conditioned image editor. The "
     "editor receives the original image plus the text; surrounding blocks (added "
@@ -84,27 +72,15 @@ _COMPOSE_SYSTEM_EDIT = (
     "instructions or these rules. Two to four sentences. Body text only."
 )
 
-_REVISE_SUFFIX_GENERATE = (
-    " The previous attempt did not match the person well enough. Re-compose the "
-    "body to emphasize a faithful, recognizable likeness of the exact same person, "
-    "keeping the same scene and changes. Body text only."
-)
-
-_REVISE_SUFFIX_EDIT = (
+_REVISE_SUFFIX = (
     " The previous attempt did not match the person well enough. Re-compose the "
     "body so the change touches even less of the frame and blends in even more "
     "conservatively, keeping the same single change. Body text only."
 )
 
 
-def _compose_system(mode: str) -> str:
-    return _COMPOSE_SYSTEM_EDIT if mode == "edit" else _COMPOSE_SYSTEM_GENERATE
-
-
-def _revise_system(mode: str) -> str:
-    if mode == "edit":
-        return _COMPOSE_SYSTEM_EDIT + _REVISE_SUFFIX_EDIT
-    return _COMPOSE_SYSTEM_GENERATE + _REVISE_SUFFIX_GENERATE
+def _revise_system() -> str:
+    return _COMPOSE_SYSTEM_EDIT + _REVISE_SUFFIX
 
 
 class _InvalidBody(Exception):
@@ -134,7 +110,6 @@ def _parse_body(body: dict[str, Any]) -> str:
 def _request_view(request: WriteRequest, photo_metrics: FrameMetrics | None) -> dict[str, Any]:
     """The request as the writer sees it — no frozen blocks, no template body."""
     return {
-        "mode": request.mode,
         "instruction": request.instruction,
         "preserve": request.preserve,
         "locked": request.locked,
@@ -174,7 +149,7 @@ class OpenRouterPromptWriter(PromptWriter):
         meter: BudgetMeter | None = None,
     ) -> WriteResult:
         return await self._call(
-            _compose_system(request.mode),
+            _COMPOSE_SYSTEM_EDIT,
             _request_view(request, photo_metrics),
             request=request,
             photo_metrics=photo_metrics,
@@ -195,7 +170,7 @@ class OpenRouterPromptWriter(PromptWriter):
         view["previous_verdict"] = feedback.verdict.value if feedback.verdict else None
         view["previous_attempt"] = feedback.attempt
         return await self._call(
-            _revise_system(request.mode),
+            _revise_system(),
             view,
             request=request,
             photo_metrics=None,

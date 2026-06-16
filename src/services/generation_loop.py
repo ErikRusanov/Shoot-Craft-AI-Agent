@@ -213,7 +213,6 @@ class GenerationLoop:
             session_key, limit=session.budget_limit, ttl_seconds=self._session_ttl
         )
 
-        mode = session.brief_analysis.mode if session.brief_analysis is not None else "generate"
         preserve = list(session.brief_analysis.preserve) if session.brief_analysis else []
         locked = {
             name: session.slots[name]
@@ -231,12 +230,10 @@ class GenerationLoop:
         # stays on the plain iteration events, so its stream is unchanged.
         emit_steps = len(steps) > 1
 
-        # Edit mode keeps the source photo's composition: the frame's nearest
-        # supported ratio overrides the preset's generate-mode value on every step.
-        aspect_ratio = (
-            nearest_aspect_ratio(face.metrics.width, face.metrics.height, _SUPPORTED_RATIOS)
-            if mode == "edit"
-            else None
+        # Keep the source photo's composition: the frame's nearest supported ratio
+        # overrides the preset's default value on every step.
+        aspect_ratio = nearest_aspect_ratio(
+            face.metrics.width, face.metrics.height, _SUPPORTED_RATIOS
         )
         # The cumulative lock ledger, derived from the step record so a resumed
         # chain re-locks exactly what its completed steps already changed.
@@ -269,16 +266,12 @@ class GenerationLoop:
                     session_key,
                     StepStartedEvent(n=step.n, title=step.title, targets=list(step.targets)),
                 )
-            lock_items = (
-                edit_lock_items(
-                    face.inventory,
-                    preserve=preserve,
-                    applied=applied,
-                    edited_targets=[*edited_targets, *step.targets],
-                    edited_text=" ".join([*edited_text, step.instruction]),
-                )
-                if mode == "edit"
-                else []
+            lock_items = edit_lock_items(
+                face.inventory,
+                preserve=preserve,
+                applied=applied,
+                edited_targets=[*edited_targets, *step.targets],
+                edited_text=" ".join([*edited_text, step.instruction]),
             )
             outcome = await self._run_step(
                 session=session,
@@ -287,7 +280,6 @@ class GenerationLoop:
                 thresholds=thresholds,
                 meter=meter,
                 step=step,
-                mode=mode,
                 preserve=preserve,
                 locked=locked,
                 defaults=defaults,
@@ -348,7 +340,6 @@ class GenerationLoop:
         thresholds: Thresholds,
         meter: BudgetMeter,
         step: EditStep,
-        mode: str,
         preserve: list[str],
         locked: dict[str, str],
         defaults: dict[str, str],
@@ -364,7 +355,6 @@ class GenerationLoop:
         session_key = session.session_key
         request = self._write_request(
             preset,
-            mode,
             step,
             preserve,
             locked,
@@ -380,7 +370,6 @@ class GenerationLoop:
         base_built = self._assemble(
             preset,
             base.body,
-            mode=mode,
             step=step,
             locked=locked,
             lock_items=lock_items,
@@ -405,7 +394,6 @@ class GenerationLoop:
                 built = self._assemble(
                     preset,
                     revised.body,
-                    mode=mode,
                     step=step,
                     locked=locked,
                     lock_items=lock_items,
@@ -605,19 +593,18 @@ class GenerationLoop:
         preset: Preset,
         body: str,
         *,
-        mode: str,
         step: EditStep,
         locked: dict[str, str],
         lock_items: list[str],
         lighting: str | None = None,
     ) -> BuiltPrompt:
-        """Edit steps get the lock-block assembly; everything else today's.
+        """Assemble the edit prompt with the lock block.
 
         A step instruction the guards reject degrades to the legacy assembly
         (belt-and-braces — it already passed resolve-time sanitization); a
         poisoned *body* re-raises out of ``assemble_prompt`` exactly as before.
         """
-        if mode == "edit" and step.instruction.strip():
+        if step.instruction.strip():
             try:
                 return assemble_edit_prompt(
                     preset,
@@ -634,7 +621,6 @@ class GenerationLoop:
     def _write_request(
         self,
         preset: Preset,
-        mode: str,
         step: EditStep,
         preserve: list[str],
         locked: dict[str, str],
@@ -647,10 +633,9 @@ class GenerationLoop:
     ) -> WriteRequest:
         """Build the writer's request — and its deterministic fallback body."""
         template_body = fill_template(
-            preset, self._slots_for_step(preset, step, mode, slots), addendum=addendum
+            preset, self._slots_for_step(preset, step, slots), addendum=addendum
         )
         return WriteRequest(
-            mode="edit" if mode == "edit" else "generate",
             instruction=step.instruction,
             preserve=preserve,
             locked=locked,
@@ -662,17 +647,11 @@ class GenerationLoop:
         )
 
     @staticmethod
-    def _slots_for_step(
-        preset: Preset, step: EditStep, mode: str, slots: dict[str, str]
-    ) -> dict[str, str]:
-        """Resolved slots for this step's deterministic body.
-
-        In edit mode the step's instruction fills the preset's free-form
-        (enum-less) slot, so each step's template body carries that step's change;
-        in generate mode the resolved slots are used as-is (today's body).
-        """
+    def _slots_for_step(preset: Preset, step: EditStep, slots: dict[str, str]) -> dict[str, str]:
+        """The step's instruction fills the preset's free-form slot so the
+        deterministic body carries that step's change."""
         merged = dict(slots)
-        if mode != "edit" or not step.instruction:
+        if not step.instruction:
             return merged
         free = next((name for name, s in preset.slots.items() if s.enum is None), None)
         if free is not None:

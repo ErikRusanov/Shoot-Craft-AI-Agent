@@ -52,20 +52,19 @@ ANSWER = "a chat or forum avatar"
 
 START_BODY = {
     "face_key": "face-1",
-    "use_case": "avatar",
     "budget_limit": 4,
     "idem_key": "idem-start-1",
 }
 INPUT_BODY = {
     "session_key": "s1",
-    "slot": "purpose",
+    "slot": "scene",
     "value": ANSWER,
     "idem_key": "idem-input-1",
 }
 APPROVE_BODY = {
     "session_key": "s1",
     "approved": True,
-    "composition_id": "neutral_grey",
+    "composition_id": None,
     "idem_key": "idem-approve-1",
 }
 
@@ -118,7 +117,7 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
         resp = await client.post("/v1/sessions/s1", json=START_BODY)
         assert resp.status_code == 202
         assert resp.json()["matched"] is True
-        assert resp.json()["preset_id"] == "demo_avatar"
+        assert resp.json()["preset_id"] is None
 
         seen: list[SseFrame] = []
         async with client.stream("GET", "/v1/sessions/s1/events") as stream:
@@ -126,9 +125,8 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
 
             await collect_until(frames, seen, "need_input")
             question = json.loads(seen[-1].data)
-            assert question["slot"] == "purpose"
-            assert ANSWER in question["options"]
-            assert question["default"] == "a general profile avatar"
+            assert question["slot"] == "scene"
+            assert question["options"] is None  # free-form slot
 
             resp = await client.post("/v1/sessions/s1/input", json=INPUT_BODY)
             assert resp.status_code == 202
@@ -138,9 +136,8 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
             assert approval["slot"] == "approve"
 
             plan = json.loads(next(f for f in seen if f.event == "plan").data)["plan"]
-            # Generate mode is a single step → the floor is one generation.
             assert plan["planned_generations"] == 1
-            assert [c["id"] for c in plan["compositions"]] == ["neutral_grey"]
+            assert [c["id"] for c in plan["compositions"]] == ["studio_neutral"]
             cost = json.loads(next(f for f in seen if f.event == "cost").data)["cost"]
             assert cost["generations"] == 1
             # Decimal USD on the 6-dp grid, serialized as a string.
@@ -187,17 +184,13 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
     assert session.fsm_state is FsmState.DONE
     assert session.approved is True
     # The reproducibility triple is pinned on the session.
-    assert session.preset_id == "demo_avatar"
-    assert session.preset_version == "1.0.0"
+    assert session.preset_id == "default"
     assert session.library_version == "examples"
     assert session.thresholds is not None
-    assert session.thresholds.similarity_threshold == pytest.approx(0.6)
-    # The answer filled the asked slot; the chosen composition overrode its slots.
-    assert session.slots["purpose"] == ANSWER
-    assert session.slots["background"] == "a clean light-grey backdrop"
-    assert session.slots["expression"] == "a neutral expression"
+    # The answer filled the free-form scene slot.
+    assert session.slots["scene"] == ANSWER
     assert session.plan is not None
-    assert session.plan.selected_composition == "neutral_grey"
+    assert session.plan.selected_composition is None
 
     assert [it.charged for it in session.iterations] == [True]
     assert session.best_result is not None
@@ -205,10 +198,10 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
     assert await container.storage.get(session.best_result.result_ref)
     await assert_generations_charged(container, "s1", 1)
 
-    # A generate-mode session never pays the inventory call.
+    # Edit-mode session pays the inventory call once.
     face = await container.store.get_face("face-1")
     assert face is not None
-    assert face.inventory is None
+    assert face.inventory is not None
 
 
 async def test_below_floor_photo_fails_before_asking(server: tuple[str, Container]) -> None:
@@ -279,8 +272,7 @@ async def test_crash_between_approve_and_loop_resumes_without_double_pay(
     initial = initial_state(
         session_key="s-crash",
         face_key="face-1",
-        use_case="avatar",
-        brief="",
+        brief="reading a book in a sunny park",
         budget_limit=to_micro(Decimal("3")),
     )
 
@@ -290,8 +282,6 @@ async def test_crash_between_approve_and_loop_resumes_without_double_pay(
         await first.storage.put(photo_ref("face-1"), noise_png())
 
         paused = await first.graph.ainvoke(initial, config=config)
-        assert paused["__interrupt__"][0].value["slot"] == "purpose"
-        paused = await first.graph.ainvoke(Command(resume=ANSWER), config=config)
         assert paused["__interrupt__"][0].value["slot"] == "approve"
         # The "crash": the first process is gone between approval being asked
         # and the loop running. Only Redis (checkpoint + state) survives.
@@ -336,7 +326,6 @@ async def test_freeform_injection_is_reasked_then_accepted(tmp_path: Any) -> Non
     initial = initial_state(
         session_key="s-inject",
         face_key="face-1",
-        use_case="something_uncurated",  # no curated preset → the `default` fallback
         brief="",
         budget_limit=to_micro(Decimal("2")),
     )
@@ -380,7 +369,6 @@ async def test_edit_session_extracts_inventory_onto_the_profile(tmp_path: Any) -
     initial = initial_state(
         session_key="s-inv",
         face_key="face-edit",
-        use_case="",  # no caller token + no curated overlap → an edit brief
         brief="replace the wall behind me with a deep blue one",
         budget_limit=to_micro(Decimal("2")),
     )

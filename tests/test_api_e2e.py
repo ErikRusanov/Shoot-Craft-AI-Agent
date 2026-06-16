@@ -39,7 +39,6 @@ SMALL_PHOTO_B64 = base64.b64encode(noise_png(side=200)).decode()
 
 START_BODY = {
     "face_key": "f1",
-    "use_case": "avatar",
     "budget_limit": 4,
     "idem_key": "start-1",
 }
@@ -132,7 +131,7 @@ async def test_full_flow_snapshot_and_terminal_guards(server: tuple[str, Contain
         assert resp.status_code == 202
         started = resp.json()
         assert started["matched"] is True
-        assert started["preset_id"] == "demo_avatar"
+        assert started["preset_id"] is None
         assert started["fsm_state"] == "created"
 
         seen: list[SseFrame] = []
@@ -143,8 +142,8 @@ async def test_full_flow_snapshot_and_terminal_guards(server: tuple[str, Contain
                 "/v1/sessions/s1/input",
                 json={
                     "session_key": "s1",
-                    "slot": "purpose",
-                    "value": "a chat or forum avatar",
+                    "slot": "scene",
+                    "value": "a clean studio backdrop",
                     "idem_key": "input-1",
                 },
             )
@@ -161,7 +160,7 @@ async def test_full_flow_snapshot_and_terminal_guards(server: tuple[str, Contain
         assert resp.status_code == 200
         snapshot = resp.json()
         assert snapshot["state"]["fsm_state"] == "done"
-        assert snapshot["state"]["preset_id"] == "demo_avatar"
+        assert snapshot["state"]["preset_id"] == "default"
         assert snapshot["generations_spent"] == 1
 
         # Terminal: no further drive, in any direction.
@@ -247,7 +246,7 @@ async def test_wrong_stage_is_409(server: tuple[str, Container]) -> None:
         # And a mismatched path/body pair never reaches the FSM.
         resp = await c.post(
             "/v1/sessions/s1/input",
-            json={"session_key": "other", "slot": "purpose", "value": "x", "idem_key": "i"},
+            json={"session_key": "other", "slot": "scene", "value": "x", "idem_key": "i"},
         )
         assert resp.status_code == 409
 
@@ -274,7 +273,7 @@ async def test_cancel_interrupts_and_blocks_resume(server: tuple[str, Container]
         # Cancelled is terminal: the parked interrupt can never be resumed.
         resp = await c.post(
             "/v1/sessions/s1/input",
-            json={"session_key": "s1", "slot": "purpose", "value": "x", "idem_key": "i2"},
+            json={"session_key": "s1", "slot": "scene", "value": "x", "idem_key": "i2"},
         )
         assert resp.status_code == 409
         assert (await c.post("/v1/sessions/s1/cancel")).status_code == 409
@@ -294,8 +293,8 @@ async def test_run_lock_blocks_concurrent_drive(server: tuple[str, Container]) -
         assert await container.store.acquire_lock("run:s1", token="intruder", ttl_seconds=60)
         body = {
             "session_key": "s1",
-            "slot": "purpose",
-            "value": "a chat or forum avatar",
+            "slot": "scene",
+            "value": "a clean studio backdrop",
             "idem_key": "input-locked",
         }
         resp = await c.post("/v1/sessions/s1/input", json=body)

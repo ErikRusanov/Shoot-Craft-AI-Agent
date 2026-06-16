@@ -58,9 +58,8 @@ def _defaults(preset: Preset) -> dict[str, str]:
     return {name: str(slot.default) for name, slot in preset.slots.items()}
 
 
-def _request(*, mode: str = "edit", instruction: str = "make the background blue") -> WriteRequest:
+def _request(*, instruction: str = "make the background blue") -> WriteRequest:
     return WriteRequest(
-        mode=mode,  # type: ignore[arg-type]
         instruction=instruction,
         preserve=["face", "pose"],
         locked={},
@@ -154,14 +153,12 @@ def test_assemble_passes_deterministic_default_body(fallback: Preset) -> None:
 
 
 def test_passport_declares_locked_slots(passport: Preset) -> None:
-    assert passport.mode == "generate"
     assert passport.slots["background"].policy == "locked"
     assert passport.slots["pose"].policy == "locked"
 
 
 def test_locked_conflict_is_surfaced(passport: Preset) -> None:
     analysis = BriefAnalysis(
-        mode="generate",
         use_case="passport",
         changes=[Change(target="background", instruction="make it bright green")],
     )
@@ -233,18 +230,15 @@ async def test_llm_revise_garbage_degrades_to_emphasized_prev() -> None:
     assert result.body == emphasize("old body")
 
 
-async def test_llm_system_prompt_is_mode_keyed() -> None:
+async def test_llm_system_prompt_is_edit_mode() -> None:
     client, transport = scripted_client(_body_body("x"))
     writer = OpenRouterPromptWriter(client, model=MODEL)
 
-    await writer.compose(_request(mode="edit"))
-    await writer.compose(_request(mode="generate"))
+    await writer.compose(_request())
 
-    edit_system = json.loads(transport.requests[0].content)["messages"][0]["content"]
-    gen_system = json.loads(transport.requests[1].content)["messages"][0]["content"]
-    assert "Describe ONLY the requested change" in edit_system
-    assert "Never re-describe the person" in edit_system
-    assert "describe the target image built around the person" in gen_system
+    system = json.loads(transport.requests[0].content)["messages"][0]["content"]
+    assert "Describe ONLY the requested change" in system
+    assert "Never re-describe the person" in system
 
 
 async def test_llm_view_carries_inventory_applied_and_attempt() -> None:

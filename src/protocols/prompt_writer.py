@@ -23,7 +23,7 @@ deterministic ``revise`` is the old fixed identity-emphasis addendum.
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Literal, NamedTuple, Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 from protocols.budget import BudgetMeter
 from schemas import FrameMetrics, PhotoInventory, ProviderUsage, Verdict
@@ -43,7 +43,6 @@ class WriteRequest(NamedTuple):
     informational, so the body does not re-describe or fight them.
     """
 
-    mode: Literal["edit", "generate"]
     instruction: str  # the step's directive: what to do this step, in words
     preserve: list[str]  # what to keep exactly as the reference shows it
     locked: dict[str, str]  # locked attribute → fixed value (informational)

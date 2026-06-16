@@ -169,7 +169,6 @@ _ROUND_TRIP_CASES: list[BaseModel] = [
     ),
     StartSessionRequest(
         face_key="face_abc",
-        use_case="resume",
         brief="a resume photo, navy suit",
         budget_limit=Decimal("0.50"),
         idem_key="k2",

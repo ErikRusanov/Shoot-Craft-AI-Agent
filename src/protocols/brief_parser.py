@@ -1,10 +1,8 @@
 """Port: brief parser — read a free-text request into a :class:`BriefAnalysis`.
 
-Replaces the use-case classifier. The classifier collapsed the brief to one
-token and threw away the constraints ("keep X") and deltas ("change Y to blue");
-the parser keeps them. One call returns the structured reading the whole
-pipeline runs on — mode, preserve-list, changes, conflicts — and the chosen
-``use_case`` (for a generate-mode curated preset) when there is one.
+One call returns the structured reading the whole pipeline runs on —
+preserve-list, changes, conflicts. The pipeline is always edit-mode; the
+parser's job is to extract what must change and what must be kept.
 
 Same failure policy as the other LLM ports: an implementation reserves a dollar
 slot through the :class:`~protocols.budget.BudgetMeter` before its paid call and
@@ -14,7 +12,6 @@ misbehaves — parsing must never fail the session.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from decimal import Decimal
 from typing import NamedTuple, Protocol, runtime_checkable
 
@@ -43,17 +40,11 @@ class BriefParser(Protocol):
         self,
         *,
         brief: str,
-        use_case: str | None,
-        use_cases: Sequence[str],
         meter: BudgetMeter | None = None,
     ) -> ParseResult:
-        """Analyze ``brief`` into mode, preserve-list, changes and conflicts.
+        """Analyze ``brief`` into preserve-list, changes and conflicts.
 
-        ``use_case`` is the caller-supplied token when the business service
-        already knows the target (then the reading is target-driven); ``None``
-        leaves the parser to decide mode and pick a ``use_case`` from
-        ``use_cases`` (the library's curated vocabulary, never the reserved
-        ``default``). ``meter`` is the session budget for the paid path; a
-        refused budget degrades to a free deterministic parse.
+        ``meter`` is the session budget for the paid path; a refused budget
+        degrades to a free deterministic parse.
         """
         ...

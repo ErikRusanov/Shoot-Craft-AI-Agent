@@ -22,9 +22,8 @@ class GraphState(TypedDict):
 
     session_key: str
     face_key: str
-    # Caller-supplied use_case, or "" when unprovided — the classify node fills it
-    # from `brief` (or leaves the reserved "default" fallback). `brief` is the
-    # user's own free-text request, "" when absent.
+    # use_case is written back by parse_brief for tracing; always "" at start.
+    # `brief` is the user's own free-text request, "" when absent.
     use_case: str
     brief: str
     budget_limit: int  # USD ceiling as micro-USD (Decimal can't round-trip the checkpoint)
@@ -47,14 +46,12 @@ class GraphState(TypedDict):
     delivered: NotRequired[bool]  # the generation loop ended in a result, not a failure
 
 
-def initial_state(
-    *, session_key: str, face_key: str, use_case: str, brief: str, budget_limit: int
-) -> GraphState:
+def initial_state(*, session_key: str, face_key: str, brief: str, budget_limit: int) -> GraphState:
     """The seed state for a fresh run — exactly the contract's start payload."""
     return {
         "session_key": session_key,
         "face_key": face_key,
-        "use_case": use_case,
+        "use_case": "",
         "brief": brief,
         "budget_limit": budget_limit,
     }

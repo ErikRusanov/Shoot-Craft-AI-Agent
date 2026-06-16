@@ -1,9 +1,9 @@
 """Step planner: deterministic decomposition and the LLM connector.
 
-The deterministic plan is one change = one step (a single step for generate); the
-LLM merges/splits and must never fail the session — any misbehavior degrades to
-the deterministic plan. The plan is never trimmed to the budget: spending is
-greedy and a short budget simply ships a partial chain.
+The deterministic plan is one change = one step; the LLM merges/splits and must
+never fail the session — any misbehavior degrades to the deterministic plan.
+The plan is never trimmed to the budget: spending is greedy and a short budget
+simply ships a partial chain.
 """
 
 from __future__ import annotations
@@ -47,13 +47,6 @@ def _steps_body(steps: list[dict[str, object]], *, cost: float | None = None) ->
 
 
 # --- deterministic ---
-
-
-def test_generate_is_a_single_step() -> None:
-    analysis = BriefAnalysis(mode="generate", use_case="headshot")
-    steps = deterministic_steps(analysis)
-    assert len(steps) == 1
-    assert steps[0].title == "headshot"
 
 
 def test_edit_is_one_step_per_change() -> None:
@@ -159,17 +152,6 @@ async def test_single_change_skips_the_llm() -> None:
 
     result = await planner.plan(analysis=_edit("a"))
     assert transport.requests == []  # one change → deterministic, no call
-    assert len(result.steps) == 1
-
-
-async def test_generate_skips_the_llm() -> None:
-    client, transport = scripted_client(
-        _steps_body([{"title": "x", "instruction": "y", "targets": []}])
-    )
-    planner = OpenRouterStepPlanner(client, model=MODEL)
-
-    result = await planner.plan(analysis=BriefAnalysis(mode="generate", use_case="avatar"))
-    assert transport.requests == []
     assert len(result.steps) == 1
 
 
