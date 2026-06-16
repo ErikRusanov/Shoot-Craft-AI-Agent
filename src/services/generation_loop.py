@@ -106,12 +106,7 @@ _REFERENCE_MISSING = "the reference photo is missing from storage"
 # "enhance" signal so hard the model produces no visible change; a brief positive
 # framing ("studio quality") achieves the same identity preservation via
 # identity_instruction (frozen, first) plus the external face-check.
-_ENHANCE_BODY = (
-    "Enhance this photo to professional studio quality. "
-    "Improve sharpness and fine detail — skin pores, individual hair strands, fabric texture. "
-    "Clean up noise and compression artifacts. "
-    "Keep the lighting, colours, and composition exactly as in the input image."
-)
+_ENHANCE_BODY = "Improve the quality of this photo. Make it professional studio quality."
 
 
 def _result_ref(session_key: str, n: int) -> str:
