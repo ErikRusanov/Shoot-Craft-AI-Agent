@@ -40,7 +40,12 @@ def preset(library: PresetLibrary) -> Preset:
 
 
 def _estimate(
-    preset: Preset, pricing: PricingTable, budget: str, *, steps: int = 1
+    preset: Preset,
+    pricing: PricingTable,
+    budget: str,
+    *,
+    steps: int = 1,
+    enhance_steps: int = 1,
 ) -> CostEstimate:
     return estimate_cost(
         preset,
@@ -48,6 +53,7 @@ def _estimate(
         pricing=pricing,
         generation_model=GEN,
         step_count=steps,
+        enhance_step_count=enhance_steps,
     )
 
 
@@ -80,14 +86,24 @@ def test_underfunded_chain_warns_partial(preset: Preset, pricing: PricingTable) 
 def test_minimum_cost_is_floor_times_per_gen_plus_llm(
     preset: Preset, pricing: PricingTable
 ) -> None:
-    estimate = _estimate(preset, pricing, "10", steps=3)
+    # No enhance steps: all steps are 1K intermediates, so the formula is uniform.
+    estimate = _estimate(preset, pricing, "10", steps=3, enhance_steps=0)
     expected = estimate.per_generation_cost * 3 + estimate.llm_overhead_cost
     assert estimate.minimum_cost == expected
 
 
 def test_minimum_cost_single_step(preset: Preset, pricing: PricingTable) -> None:
-    estimate = _estimate(preset, pricing, "10", steps=1)
+    # No enhance steps: single 1K intermediate step.
+    estimate = _estimate(preset, pricing, "10", steps=1, enhance_steps=0)
     assert estimate.minimum_cost == estimate.per_generation_cost + estimate.llm_overhead_cost
+
+
+def test_minimum_cost_mixed_pricing(preset: Preset, pricing: PricingTable) -> None:
+    # 3 steps: 2 intermediate (1K) + 1 enhance (4K). The enhance costs more than
+    # per_generation_cost, so minimum_cost > per_generation_cost * 3 + overhead.
+    estimate_mixed = _estimate(preset, pricing, "10", steps=3, enhance_steps=1)
+    estimate_all_1k = _estimate(preset, pricing, "10", steps=3, enhance_steps=0)
+    assert estimate_mixed.minimum_cost > estimate_all_1k.minimum_cost
 
 
 def test_informational_unit_prices(preset: Preset, pricing: PricingTable) -> None:

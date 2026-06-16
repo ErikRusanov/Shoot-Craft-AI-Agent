@@ -433,9 +433,13 @@ class GenerationLoop:
                 params = base_built.params
             if aspect_ratio is not None:
                 params = params.model_copy(update={"aspect_ratio": aspect_ratio})
+            params = params.model_copy(update={"output_size": "4K" if step.is_enhance else "1K"})
 
             reservation = await meter.reserve(
-                PaidCallKind.GENERATION, estimate=self._reserve_estimate(built, send_crop=face_crop)
+                PaidCallKind.GENERATION,
+                estimate=self._reserve_estimate(
+                    built, send_crop=face_crop, output_size=params.output_size
+                ),
             )
             if reservation is None:
                 logger.info("generation_loop.budget_exhausted", session_key=session_key, n=n)
@@ -699,12 +703,15 @@ class GenerationLoop:
             )
             await self._checkpoint(session)
 
-    def _reserve_estimate(self, built: BuiltPrompt, *, send_crop: bytes | None) -> Decimal:
+    def _reserve_estimate(
+        self, built: BuiltPrompt, *, send_crop: bytes | None, output_size: str = "1K"
+    ) -> Decimal:
         """Padded USD reservation for one generation with this exact prompt."""
         return self._pricing.generation_reserve(
             self._generation_model,
             prompt_chars=len(built.text),
             reference_count=1,
+            output_size=output_size,
             face_detail=built.params.face_media_resolution if send_crop is not None else None,
         )
 
