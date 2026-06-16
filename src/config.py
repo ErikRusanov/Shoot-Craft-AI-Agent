@@ -136,9 +136,11 @@ class Settings(BaseSettings):
     # preset's frozen blocks with the pixel-for-pixel lock language the core's
     # edit-mode lock-block assembly pairs with; 0.8.0 dropped the convergence
     # block (preset schema_v 5) now that budget is spent greedily, not forecast
-    # per-step. A prod deploy that pulls an older package fails fast at startup
-    # rather than running a stale contract. Only enforced for 'package' mode.
-    preset_min_library_version: str = "0.8.0"
+    # per-step; 0.9.0 converted all curated presets to edit mode (free-form scene
+    # slot, pixel-for-pixel identity lock, delta-only prompt_structure).
+    # A prod deploy that pulls an older package fails fast at startup rather
+    # than running a stale contract. Only enforced for 'package' mode.
+    preset_min_library_version: str = "0.9.0"
 
     # --- Generation loop / budget safety ---
     # budget_limit is supplied per session by the business service; this is only a
