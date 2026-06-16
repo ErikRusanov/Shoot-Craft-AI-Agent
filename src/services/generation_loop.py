@@ -101,12 +101,27 @@ _BUDGET_EXHAUSTED = "budget exhausted before reaching the identity target"
 _NO_DELIVERABLE = "no attempt reached the identity floor"
 _REFERENCE_MISSING = "the reference photo is missing from storage"
 
-# Quality-enhancement prompt body — short and positive, no "do not change X" lists.
-# Research and A/B tests show that long locked-attribute enumerations suppress the
-# "enhance" signal so hard the model produces no visible change; a brief positive
-# framing ("studio quality") achieves the same identity preservation via
-# identity_instruction (frozen, first) plus the external face-check.
-_ENHANCE_BODY = "Improve the quality of this photo. Make it professional studio quality."
+# Quality-enhancement prompt body — positive framing for rendering quality only.
+# Research and A/B tests show that enumerating every locked attribute suppresses
+# the enhance signal so hard the model produces no visible change; a short body
+# is used instead. However the body must explicitly name content preservation to
+# prevent the model from interpreting "quality" as "reframe to a studio shot".
+_ENHANCE_BODY = (
+    "Enhance the technical rendering quality of this photograph. "
+    "Increase micro-detail sharpness, lift shadow detail, and improve color "
+    "accuracy, saturation, and dynamic range. Match the grain and tonal character "
+    "of the existing scene. "
+    "The background, framing, composition, clothing, and every element in the "
+    "scene must remain exactly as they are — this is a rendering pass only, "
+    "not a content or setting change."
+)
+# The single-change scope line for assemble_edit_prompt — states what IS allowed
+# (rendering quality) and what is NOT (scene, content, framing).
+_ENHANCE_ONLY_CHANGE = (
+    "enhance rendering quality: increase sharpness, improve color accuracy and "
+    "dynamic range, reduce noise — without altering the scene, background, "
+    "framing, clothing, or any scene content"
+)
 
 
 def _result_ref(session_key: str, n: int) -> str:
@@ -309,7 +324,23 @@ class GenerationLoop:
                 break
             step.status = "completed"
             step.result_ref = outcome.best.result_ref
-            session.best_result = outcome.best  # the latest completed step wins
+            # Enhance may degrade similarity if it reframes or over-smooths; in
+            # that case keep the best result from the prior step rather than
+            # delivering a worse output just because it was last.
+            prior_best = session.best_result
+            if (
+                step.is_enhance
+                and prior_best is not None
+                and outcome.best.similarity < prior_best.similarity
+            ):
+                logger.info(
+                    "generation_loop.enhance_regression_kept_prior",
+                    session_key=session_key,
+                    prior_similarity=round(prior_best.similarity, 4),
+                    enhance_similarity=round(outcome.best.similarity, 4),
+                )
+            else:
+                session.best_result = outcome.best  # the latest completed step wins
             working = outcome.best_bytes if outcome.best_bytes is not None else working
             absorb(step)  # the next step locks this one's outcome
             await self._checkpoint(session)
@@ -362,13 +393,27 @@ class GenerationLoop:
         session_key = session.session_key
         lighting = face.inventory.lighting.strip() if face.inventory is not None else None
 
-        # Enhance steps skip the writer entirely: a short positive body
-        # ("studio quality") is more effective than a long locked-attribute
-        # list — the latter suppresses the change signal so hard the model
-        # produces no visible improvement.
+        # Enhance steps skip the writer entirely: a short positive body is more
+        # effective than a long locked-attribute list — the latter suppresses
+        # the change signal so hard the model produces no visible improvement.
+        # We still use assemble_edit_prompt (not assemble_prompt) so the model
+        # gets a minimal lock context (person + prior applied items) and the
+        # single-change scope line — preventing it from misreading "rendering
+        # quality" as "turn this into a studio headshot".
         request: WriteRequest | None
         if step.is_enhance:
-            base_built = assemble_prompt(preset, _ENHANCE_BODY)
+            enhance_lock_items = edit_lock_items(
+                None,  # skip per-field inventory — full enumeration suppresses enhance
+                applied=applied,  # lock what the prior steps already changed
+            )
+            base_built = assemble_edit_prompt(
+                preset,
+                _ENHANCE_BODY,
+                only_change=_ENHANCE_ONLY_CHANGE,
+                lock_items=enhance_lock_items,
+                locks=locked,
+                lighting=None,  # prior steps may have changed lighting; don't re-anchor to original
+            )
             prev_body = ""
             request = None
         else:

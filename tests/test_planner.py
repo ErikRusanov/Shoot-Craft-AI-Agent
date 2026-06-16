@@ -31,11 +31,12 @@ def _meter(limit: str = "1") -> tuple[BudgetService, BudgetMeter]:
     return svc, svc.meter("sess-1", limit=Decimal(limit), ttl_seconds=60)
 
 
-def _edit(*targets: str) -> BriefAnalysis:
+def _edit(*targets: str, preserve: list[str] | None = None) -> BriefAnalysis:
     return BriefAnalysis(
         mode="edit",
         use_case=None,
         changes=[Change(target=t, instruction=f"change the {t}") for t in targets],
+        preserve=preserve or [],
     )
 
 
@@ -190,3 +191,91 @@ async def test_budget_refusal_degrades_without_calling() -> None:
     result = await planner.plan(analysis=_edit("background", "lighting"), meter=meter)
     assert transport.requests == []
     assert result.cost == Decimal("0")
+
+
+# --- inventory reconciliation ---
+
+
+async def test_preserve_list_is_sent_in_payload() -> None:
+    body = _steps_body(
+        [
+            {"title": "bg", "instruction": "city backdrop", "targets": ["background"]},
+            {"title": "light", "instruction": "golden hour", "targets": ["lighting"]},
+        ]
+    )
+    client, transport = scripted_client(body)
+    planner = OpenRouterStepPlanner(client, model=MODEL)
+
+    await planner.plan(
+        analysis=_edit(
+            "background",
+            "lighting",
+            preserve=["city background setting", "jeans and jacket"],
+        ),
+        inventory=PhotoInventory(background="residential interior"),
+    )
+
+    sent = json.loads(transport.requests[0].content)
+    user = json.loads(sent["messages"][1]["content"])
+    assert user["preserve_list"] == ["city background setting", "jeans and jacket"]
+
+
+async def test_single_change_with_inventory_and_preserve_calls_llm() -> None:
+    """One explicit change + inventory + preserve → LLM called for reconciliation."""
+    body = _steps_body(
+        [
+            {"title": "bg", "instruction": "replace with city", "targets": ["background"]},
+            {
+                "title": "clothing",
+                "instruction": "replace t-shirt with jeans and jacket",
+                "targets": ["clothing"],
+            },
+            {"title": "light", "instruction": "golden hour", "targets": ["lighting"]},
+        ]
+    )
+    client, transport = scripted_client(body)
+    planner = OpenRouterStepPlanner(client, model=MODEL)
+
+    result = await planner.plan(
+        analysis=_edit("lighting", preserve=["city background setting", "jeans and jacket"]),
+        inventory=PhotoInventory(background="residential interior", clothing="beige t-shirt"),
+    )
+
+    assert len(transport.requests) == 1  # LLM was called despite only 1 explicit change
+    assert len(result.steps) == 3  # 1 explicit + 2 implicit discovered
+
+
+async def test_implicit_target_accepted_when_inventory_present() -> None:
+    """The LLM may add targets not in the brief when inventory is available."""
+    body = _steps_body(
+        [
+            {"title": "bg", "instruction": "city backdrop", "targets": ["background"]},
+            {"title": "clothing", "instruction": "add jeans", "targets": ["clothing"]},
+            {"title": "light", "instruction": "golden hour", "targets": ["lighting"]},
+        ]
+    )
+    client, _ = scripted_client(body)
+    planner = OpenRouterStepPlanner(client, model=MODEL)
+
+    result = await planner.plan(
+        analysis=_edit("lighting", "background"),
+        inventory=PhotoInventory(clothing="beige t-shirt"),
+    )
+
+    # "clothing" was not an explicit target but is accepted as an implicit discovery
+    assert any("clothing" in s.targets for s in result.steps)
+    assert any("lighting" in s.targets for s in result.steps)
+    assert any("background" in s.targets for s in result.steps)
+
+
+async def test_invented_target_without_inventory_still_falls_back() -> None:
+    """Without inventory, extra targets are hallucinations — still falls back."""
+    client, _ = scripted_client(
+        _steps_body(
+            [{"title": "x", "instruction": "y", "targets": ["background", "lighting", "halo"]}]
+        )
+    )
+    planner = OpenRouterStepPlanner(client, model=MODEL)
+
+    result = await planner.plan(analysis=_edit("background", "lighting"))
+    assert len(result.steps) == 2  # deterministic fallback, one per explicit change

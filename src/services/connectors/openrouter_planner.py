@@ -8,11 +8,16 @@ headset"), and the ``applied`` phrase later steps lock. Structured output
 target must be covered exactly once, validated here, so the planner can neither
 drop nor invent a change.
 
-Only edit-mode briefs with two or more changes are worth a call — a generate
-brief or a single change is the deterministic single/one-step plan, free. Failure
-policy mirrors the other ports: any misbehavior degrades to the deterministic
-plan. The planner reserves a ``SLOT_FILL`` slot (a cheap auxiliary call), so
-pricing and the budget already cover it.
+The planner also reconciles the brief against the photo inventory. The brief
+parser sees only the user's text, so anything the user describes as their current
+state (the preserve list) may differ from what the photo actually shows. Any
+discrepancy is an implicit change — the planner discovers and plans it alongside
+the explicit changes. This is why inventory + a non-empty preserve list can
+trigger an LLM call even with only one explicit change.
+
+Failure policy mirrors the other ports: any misbehavior degrades to the
+deterministic plan. The planner reserves a ``SLOT_FILL`` slot (a cheap auxiliary
+call), so pricing and the budget already cover it.
 """
 
 from __future__ import annotations
@@ -30,35 +35,49 @@ from services.planner import DeterministicStepPlanner
 
 log = structlog.get_logger(__name__)
 
-# One change per step is the rule, not the exception: every pass through the
-# editor risks the face, but a narrow pass regenerates less — the lock block
-# around each step can only say "the ONLY change allowed" when the step really
-# is one change.
 _SYSTEM_PROMPT = (
-    "You order a list of requested photo-edit changes into steps for a "
-    "reference-conditioned image editor that applies ONE edit at a time and chains "
-    "results: the output of step 1 is the input of step 2. Identity drift compounds "
-    "with every pass, so minimize the number of passes and the risk per pass.\n"
+    "You plan photo-edit steps for a reference-conditioned image editor that applies "
+    "ONE change at a time, chaining outputs: step N+1 edits the output of step N. "
+    "Identity drift compounds with every pass, so minimize passes and risk per pass.\n"
+    "\n"
+    "PHASE 1 — RECONCILE THE BRIEF AGAINST THE PHOTO:\n"
+    "You receive two kinds of input:\n"
+    "  • explicit_changes — changes the user explicitly requested.\n"
+    "  • preserve_list — what the user described as their current photo (pose, setting,\n"
+    "    clothing, etc.) that they want kept.\n"
+    "  • photo_inventory — what the photo actually shows.\n"
+    "Compare each preserve_list item against the matching field in photo_inventory. "
+    "If the user's description of their photo differs from what the photo actually "
+    "shows, that discrepancy is an IMPLICIT change to add to the plan.\n"
+    "Examples:\n"
+    "  • preserve says 'city background setting', inventory shows 'residential interior "
+    "with white shelving' → add a step: change background to a city/urban setting.\n"
+    "  • preserve says 'casual wear (jeans and jacket)', inventory shows 'beige t-shirt' "
+    "→ add a step: replace the beige t-shirt with jeans and a casual jacket.\n"
+    "Do NOT add an implicit change when the preserve item is a generic instruction "
+    "('face and identity', 'framing and composition') rather than a description of a "
+    "specific visual element, or when the description and inventory say the same thing "
+    "in different words. Only flag real, clear visual discrepancies.\n"
+    "\n"
+    "PHASE 2 — ORDER ALL CHANGES INTO STEPS:\n"
+    "Combine explicit_changes and any implicit changes from phase 1 into an ordered plan.\n"
     "Rules:\n"
-    "- One change per step by default. Merge changes into a single step ONLY when "
-    "they describe the same scene region: background, ambient lighting and overall "
-    "color grade may merge into one step. Nothing else merges — never merge a "
-    "clothing change with an accessory change, and never merge anything with a "
-    "change near the face.\n"
+    "- One change per step by default. Merge ONLY when changes target the same scene "
+    "region: background, ambient lighting, and overall color grade may merge into one "
+    "step. Nothing else merges — never merge clothing with accessories; never merge "
+    "anything near the face.\n"
     "- Order steps from least to most identity-sensitive: (1) scene-level changes "
-    "(background, setting, lighting, color grade) first; (2) clothing and "
-    "body-level changes next; (3) accessories and anything close to the face "
-    "(glasses, earrings, a headset, a hat) last.\n"
-    "- Make each instruction self-contained and concrete. Resolve references "
-    "against the photo inventory when provided: write 'replace the existing white "
-    "earbud in the left ear with a black over-ear headset microphone', not 'add a "
-    "headset'. Name colors, materials and placement explicitly.\n"
-    "- For each step also write 'applied': a short noun phrase naming the changed "
-    "attribute at its NEW value once the step is done (e.g. 'the new plain white "
-    "crew-neck t-shirt'). Later steps will lock this phrase as untouchable.\n"
-    "- Each step gets a short title, the instruction, the list of target names it "
-    "covers, and 'applied'. Every input target must appear in exactly one step. "
-    "Do not invent or drop targets."
+    "(background, setting, lighting, color grade) first; (2) clothing and body-level "
+    "next; (3) accessories and anything close to the face (glasses, earrings, hat) last.\n"
+    "- Make each instruction self-contained and concrete. Resolve references against "
+    "photo_inventory: write 'replace the existing beige t-shirt with dark jeans and a "
+    "casual blazer jacket', not 'change clothing'. Name colors, materials, and "
+    "placement explicitly.\n"
+    "- For each step write 'applied': a short noun phrase naming the changed attribute "
+    "at its NEW value once the step is done (e.g. 'the new dark jeans and blazer '). "
+    "Later steps will lock this phrase as untouchable.\n"
+    "- Every explicit_change target must appear in exactly one step. Implicit targets "
+    "discovered in phase 1 are additional steps. Do not drop any target."
 )
 
 
@@ -90,7 +109,12 @@ def _response_schema() -> dict[str, Any]:
     }
 
 
-def _parse_steps(body: dict[str, Any], analysis: BriefAnalysis) -> list[EditStep]:
+def _parse_steps(
+    body: dict[str, Any],
+    analysis: BriefAnalysis,
+    *,
+    allow_extra_targets: bool = False,
+) -> list[EditStep]:
     try:
         content = body["choices"][0]["message"]["content"]
         raw_steps = json.loads(content)["steps"]
@@ -99,7 +123,7 @@ def _parse_steps(body: dict[str, Any], analysis: BriefAnalysis) -> list[EditStep
     if not isinstance(raw_steps, list) or not raw_steps:
         raise _InvalidPlan("planner returned no steps")
 
-    wanted = {c.target for c in analysis.changes}
+    explicit_targets = {c.target for c in analysis.changes}
     covered: set[str] = set()
     steps: list[EditStep] = []
     for i, item in enumerate(raw_steps, start=1):
@@ -117,7 +141,11 @@ def _parse_steps(body: dict[str, Any], analysis: BriefAnalysis) -> list[EditStep
         if not isinstance(targets, list) or not all(isinstance(t, str) for t in targets):
             raise _InvalidPlan("a step's targets are not strings")
         clean = [t.strip() for t in targets if t.strip()]
-        if not set(clean) <= wanted:
+        # Extra targets (not in the brief) are only allowed when an inventory
+        # was provided — they are implicit changes discovered by reconciliation.
+        # Without an inventory the planner has nothing to reconcile against, so
+        # an extra target is a hallucination and the plan falls back.
+        if not allow_extra_targets and not set(clean) <= explicit_targets:
             raise _InvalidPlan("a step covers a target not in the brief")
         if covered & set(clean):
             raise _InvalidPlan("a target is covered by more than one step")
@@ -135,8 +163,12 @@ def _parse_steps(body: dict[str, Any], analysis: BriefAnalysis) -> list[EditStep
             )
         )
 
-    if covered != wanted:
-        raise _InvalidPlan("not every change is covered by a step")
+    # All explicit targets must be covered; extra steps for implicit (discovered)
+    # changes are permitted beyond the explicit set.
+    if not explicit_targets <= covered:
+        raise _InvalidPlan(
+            f"explicit changes not covered by any step: {explicit_targets - covered!r}"
+        )
     return steps
 
 
@@ -161,8 +193,11 @@ class OpenRouterStepPlanner(StepPlanner):
         inventory: PhotoInventory | None = None,
         meter: BudgetMeter | None = None,
     ) -> PlanResult:
-        if len(analysis.changes) < 2:
-            # Nothing to merge — one-step deterministic plan, free.
+        has_inventory = inventory is not None and not inventory.is_empty()
+        needs_reconciliation = has_inventory and bool(analysis.preserve)
+        if len(analysis.changes) < 2 and not needs_reconciliation:
+            # Single explicit change and no inventory to reconcile against —
+            # deterministic one-step plan, free.
             return await self._fallback.plan(analysis=analysis)
         # Reserve before the paid call; a refused budget degrades to the
         # deterministic plan rather than failing the session.
@@ -172,7 +207,11 @@ class OpenRouterStepPlanner(StepPlanner):
             return await self._fallback.plan(analysis=analysis)
         try:
             body = await self._client.chat_completion(self._payload(analysis, inventory))
-            steps = _parse_steps(body, analysis)
+            steps = _parse_steps(
+                body,
+                analysis,
+                allow_extra_targets=has_inventory,
+            )
             usage = parse_usage(body)
             if reservation is None:
                 return PlanResult(steps=steps)
@@ -187,12 +226,14 @@ class OpenRouterStepPlanner(StepPlanner):
             return await self._fallback.plan(analysis=analysis)
 
     def _payload(self, analysis: BriefAnalysis, inventory: PhotoInventory | None) -> dict[str, Any]:
-        user_message = {
-            "changes": [
+        user_message: dict[str, Any] = {
+            "explicit_changes": [
                 {"target": c.target, "instruction": c.instruction} for c in analysis.changes
             ],
-            # What the photo actually shows, so instructions resolve concretely;
-            # null when no inventory was extracted.
+            # What the user described as their current photo — compared against
+            # photo_inventory in phase 1 to discover implicit changes.
+            "preserve_list": analysis.preserve,
+            # What the photo actually shows — the ground truth for reconciliation.
             "photo_inventory": inventory.model_dump(exclude={"schema_v"})
             if inventory is not None and not inventory.is_empty()
             else None,
