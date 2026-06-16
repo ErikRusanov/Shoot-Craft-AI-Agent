@@ -1,5 +1,4 @@
-"""Deterministic step planner — the no-LLM fallback behind the StepPlanner port,
-plus the budget-trim that keeps a plan honest.
+"""Deterministic step planner — the no-LLM fallback behind the StepPlanner port.
 
 The deterministic plan is the simplest faithful one: a generate-mode brief is a
 single step; an edit-mode brief is one step per change, ordered from scene-level
@@ -8,15 +7,13 @@ the risky edits run last, on a frame that already converged). No merging — tha
 judgment is the LLM planner's; this is the stable baseline the pipeline
 degrades to.
 
-:func:`fit_to_budget` is separate and always deterministic: when the budget
-cannot fund every step it trims the **tail** (marks the trailing steps
-``skipped``) and returns a note, so a partial plan is explicit on the record
-rather than a silent cap.
+The plan is **not** trimmed to the budget: under greedy pay-as-you-go the runtime
+reserves before each generation and stops cleanly when the next one would overdraw,
+shipping whatever steps completed. A budget too small to finish the chain produces
+a partial result, not a pre-emptively shortened plan.
 """
 
 from __future__ import annotations
-
-from collections.abc import Sequence
 
 from protocols.budget import BudgetMeter
 from protocols.planner import PlanResult
@@ -101,23 +98,6 @@ def deterministic_steps(analysis: BriefAnalysis) -> list[EditStep]:
         EditStep(n=i, title=c.target, instruction=c.instruction, targets=[c.target])
         for i, c in enumerate(ordered, start=1)
     ]
-
-
-def fit_to_budget(steps: Sequence[EditStep], max_steps: int) -> tuple[list[EditStep], str | None]:
-    """Keep the first ``max_steps`` steps; mark the trailing ones ``skipped``.
-
-    Returns the (re-numbered-unchanged) steps and a note when anything was
-    trimmed — never a silent drop. ``max_steps <= 0`` skips everything, which the
-    caller reads as "budget cannot fund even one step".
-    """
-    if max_steps >= len(steps):
-        return list(steps), None
-    kept = [
-        step if position <= max_steps else step.model_copy(update={"status": "skipped"})
-        for position, step in enumerate(steps, start=1)
-    ]
-    note = f"budget funds {max(max_steps, 0)} of {len(steps)} steps; the rest are skipped"
-    return kept, note
 
 
 class DeterministicStepPlanner:

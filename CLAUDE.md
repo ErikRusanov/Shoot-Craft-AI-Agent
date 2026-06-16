@@ -142,13 +142,15 @@ loads into memory at startup, indexes, and holds it immutably:
 - `PRESET_SOURCE=path` + `PRESET_LIBRARY_PATH=…` (dev/custom) → read that dir
 - default (no config) → `presets/examples/` from this repo
 
-**Preset schema v4 (writer pipeline).** A preset declares `mode`
+**Preset schema v5 (writer pipeline, greedy budget).** A preset declares `mode`
 (`generate`/`edit`/`both`), free-text `style_notes` for the writer, and per-slot
 `policy` (`locked` = a deterministic non-negotiable attribute that wins over a
 user delta, the conflict surfaced; `default` = the preset default, a user delta
 wins). `prompt_structure` is **demoted** to the no-LLM fallback template — the
 writer composes the body as the primary path; the builder assembles the frozen
-blocks and locks around it.
+blocks and locks around it. v5 dropped the `convergence` block: budget is spent
+greedily (reserve-per-generation, stop when the next overdraws), not forecast
+from a per-step attempt count, so a preset carries no generation-count estimate.
 
 **Fallback convention (needs `photocore-presets >= 0.3.0`).** The id `default`
 is the reserved fallback preset and the base **edit-mode** preset; its only
@@ -159,9 +161,10 @@ an edit brief with no curated use-case). Its single `ask:true` slot (`scene`) is
 the one **free-form** (no-enum) slot, fed from the brief; `assemble_prompt`
 sanitizes the composed body (scene description only — attempts to edit the
 face/identity or override the frozen blocks are rejected, the caller re-asks).
-`PRESET_MIN_LIBRARY_VERSION` (default `0.7.0` — preset schema v4 plus the
-pixel-for-pixel lock blocks in the edit fallback) is enforced in `package` mode
-at startup so a deploy can't silently lose the fallback or run a stale contract.
+`PRESET_MIN_LIBRARY_VERSION` (default `0.8.0` — preset schema v5, dropping the
+convergence block on top of the 0.7.0 pixel-for-pixel lock blocks) is enforced in
+`package` mode at startup so a deploy can't silently lose the fallback or run a
+stale contract.
 
 `SessionState` must record `preset_id`, `preset_version` **and** `library_version`
 (the package version) — otherwise a result can't be reproduced after a library

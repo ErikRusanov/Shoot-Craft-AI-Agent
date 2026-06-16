@@ -51,7 +51,6 @@ from schemas.inventory import PhotoInventory
 from schemas.presets import (
     AppliesTo,
     Composition,
-    ConvergenceProfile,
     Generation,
     Preset,
     Slot,
@@ -80,7 +79,6 @@ __all__ = [
     "Change",
     "Composition",
     "CompositionChoice",
-    "ConvergenceProfile",
     "ConvergenceStats",
     "CostEstimate",
     "CostEvent",

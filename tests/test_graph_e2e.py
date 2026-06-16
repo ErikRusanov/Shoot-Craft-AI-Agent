@@ -138,11 +138,11 @@ async def test_full_session_e2e(server: tuple[str, Container]) -> None:
             assert approval["slot"] == "approve"
 
             plan = json.loads(next(f for f in seen if f.event == "plan").data)["plan"]
-            # demo_avatar ships expected_generations=2, under budget_limit=4.
-            assert plan["planned_generations"] == 2
+            # Generate mode is a single step → the floor is one generation.
+            assert plan["planned_generations"] == 1
             assert [c["id"] for c in plan["compositions"]] == ["neutral_grey"]
             cost = json.loads(next(f for f in seen if f.event == "cost").data)["cost"]
-            assert cost["generations"] == 2
+            assert cost["generations"] == 1
             # Decimal USD on the 6-dp grid, serialized as a string.
             assert cost["budget_limit"] == "4.000000"
 

@@ -1,8 +1,9 @@
-"""Step planner: deterministic decomposition, budget trim, and the LLM connector.
+"""Step planner: deterministic decomposition and the LLM connector.
 
 The deterministic plan is one change = one step (a single step for generate); the
 LLM merges/splits and must never fail the session — any misbehavior degrades to
-the deterministic plan. fit_to_budget trims the tail explicitly, never silently.
+the deterministic plan. The plan is never trimmed to the budget: spending is
+greedy and a short budget simply ships a partial chain.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from protocols import BudgetMeter
 from schemas import BriefAnalysis, Change, PhotoInventory
 from services.budget import BudgetService
 from services.connectors import InMemoryStateStore, OpenRouterStepPlanner
-from services.planner import DeterministicStepPlanner, deterministic_steps, fit_to_budget
+from services.planner import DeterministicStepPlanner, deterministic_steps
 from services.pricing import PricingTable
 from tests.openrouter_mock import scripted_client, text_completion_body
 
@@ -74,30 +75,6 @@ async def test_deterministic_planner_is_free() -> None:
     result = await DeterministicStepPlanner().plan(analysis=_edit("background"))
     assert len(result.steps) == 1
     assert result.cost == Decimal("0")
-
-
-# --- fit_to_budget ---
-
-
-def test_fit_keeps_all_when_affordable() -> None:
-    steps = deterministic_steps(_edit("a", "b"))
-    kept, note = fit_to_budget(steps, 2)
-    assert note is None
-    assert all(s.status == "pending" for s in kept)
-
-
-def test_fit_trims_the_tail_with_a_note() -> None:
-    steps = deterministic_steps(_edit("a", "b", "c"))
-    kept, note = fit_to_budget(steps, 1)
-    assert [s.status for s in kept] == ["pending", "skipped", "skipped"]
-    assert note is not None and "1 of 3" in note
-
-
-def test_fit_zero_skips_everything() -> None:
-    steps = deterministic_steps(_edit("a", "b"))
-    kept, note = fit_to_budget(steps, 0)
-    assert all(s.status == "skipped" for s in kept)
-    assert note is not None
 
 
 # --- LLM connector ---

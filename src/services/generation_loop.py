@@ -79,7 +79,7 @@ from services.prompt_builder import (
     edit_lock_items,
     fill_template,
 )
-from utils.images import nearest_aspect_ratio
+from utils.images import decode_rgb, encode_jpeg, nearest_aspect_ratio, upscale
 
 logger = structlog.get_logger(__name__)
 
@@ -141,6 +141,7 @@ class GenerationLoop:
         face_ttl_seconds: int,
         max_iterations: int,
         generation_model: str,
+        upscale_factor: int = 0,
     ) -> None:
         self._store = store
         self._storage = storage
@@ -152,6 +153,7 @@ class GenerationLoop:
         self._pricing = pricing
         self._idempotency = idempotency
         self._session_ttl = session_ttl_seconds
+        self._upscale_factor = upscale_factor
         self._face_ttl = face_ttl_seconds
         self._max_iterations = max_iterations
         self._generation_model = generation_model
@@ -372,10 +374,17 @@ class GenerationLoop:
             inventory=face.inventory,
             applied=applied,
         )
+        lighting = face.inventory.lighting.strip() if face.inventory is not None else None
         base = await self._writer.compose(request, photo_metrics=face.metrics, meter=meter)
         await self._record_writer_cost(session, base)
         base_built = self._assemble(
-            preset, base.body, mode=mode, step=step, locked=locked, lock_items=lock_items
+            preset,
+            base.body,
+            mode=mode,
+            step=step,
+            locked=locked,
+            lock_items=lock_items,
+            lighting=lighting,
         )
         prev_body = base.body
         base_temperature = base_built.params.temperature
@@ -394,7 +403,13 @@ class GenerationLoop:
                 await self._record_writer_cost(session, revised)
                 prev_body = revised.body
                 built = self._assemble(
-                    preset, revised.body, mode=mode, step=step, locked=locked, lock_items=lock_items
+                    preset,
+                    revised.body,
+                    mode=mode,
+                    step=step,
+                    locked=locked,
+                    lock_items=lock_items,
+                    lighting=lighting,
                 )
                 params = base_built.params.model_copy(
                     update={"temperature": base_temperature * _TEMPERATURE_DECAY ** (attempt - 1)}
@@ -484,7 +499,10 @@ class GenerationLoop:
                 continue
 
             cost = await reservation.settle(_usage_cost(generated.usage))
-            result_ref = await self._storage.put(_result_ref(session_key, n), generated.image_bytes)
+            result_bytes = generated.image_bytes
+            if self._upscale_factor > 1:
+                result_bytes = encode_jpeg(upscale(decode_rgb(result_bytes), self._upscale_factor))
+            result_ref = await self._storage.put(_result_ref(session_key, n), result_bytes)
             iteration = Iteration(
                 n=n,
                 step_n=step.n,
@@ -591,6 +609,7 @@ class GenerationLoop:
         step: EditStep,
         locked: dict[str, str],
         lock_items: list[str],
+        lighting: str | None = None,
     ) -> BuiltPrompt:
         """Edit steps get the lock-block assembly; everything else today's.
 
@@ -606,6 +625,7 @@ class GenerationLoop:
                     only_change=step.instruction,
                     lock_items=lock_items,
                     locks=locked,
+                    lighting=lighting,
                 )
             except FreeFormRejectedError:
                 logger.warning("generation_loop.edit_assembly_rejected", step_n=step.n)

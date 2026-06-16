@@ -60,9 +60,9 @@ from schemas import (
     Verdict,
 )
 from services.budget import BudgetService
-from services.estimator import affordable_step_count, estimate_cost
+from services.estimator import estimate_cost
 from services.generation_loop import GenerationLoop
-from services.planner import deterministic_steps, fit_to_budget
+from services.planner import deterministic_steps
 from services.preset_matcher import PresetLibrary
 from services.pricing import PricingTable
 from services.prompt_builder import FreeFormRejectedError, assemble_prompt, fill_template
@@ -96,7 +96,6 @@ class GraphServices:
     budget: BudgetService
     pricing: PricingTable
     generation_model: str
-    default_expected_generations: int
     session_ttl_seconds: int
     face_ttl_seconds: int
 
@@ -141,7 +140,7 @@ def _plan_summary(
     analysis: BriefAnalysis,
     steps: list[EditStep],
     slots: dict[str, str],
-    trim_note: str | None,
+    budget_note: str | None,
 ) -> str:
     """Human-readable plan: the ordered steps (edit) or the styled target (generate)."""
     if analysis.mode == "edit" and steps:
@@ -151,8 +150,8 @@ def _plan_summary(
     summary = f"{preset.id} v{preset.version}: {body}"
     if analysis.conflicts:
         summary += " | conflicts (locked attributes win): " + "; ".join(analysis.conflicts)
-    if trim_note:
-        summary += f" | {trim_note}"
+    if budget_note:
+        summary += f" | {budget_note}"
     return summary
 
 
@@ -406,11 +405,14 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
         }
 
     async def plan_steps(state: GraphState) -> dict[str, Any]:
-        """Cut the changes into ordered steps, trim to budget, forecast, publish.
+        """Cut the changes into ordered steps, forecast, publish.
 
-        The plan the user approves is the step plan. The forecast sums over the
-        steps the budget can fund; trailing steps that don't fit are marked
-        ``skipped`` (visible, never a silent cap).
+        The plan the user approves is the full step plan — never trimmed to the
+        budget. Spending is greedy: the runtime reserves before each generation and
+        stops cleanly when the next one would overdraw, shipping whatever steps
+        completed. The forecast reports the floor (one generation per step) and the
+        budget ceiling, so an under-funded chain reads as "may finish partial"
+        rather than a pre-emptively shortened plan.
         """
         session_key = state["session_key"]
         preset = _resolve(state)
@@ -427,7 +429,7 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
             inventory=face.inventory if face is not None else None,
             meter=meter,
         )
-        raw_steps = plan_result.steps or deterministic_steps(analysis)
+        steps = plan_result.steps or deterministic_steps(analysis)
         if plan_result.cost > 0:
             session.llm_calls.append(
                 PaidCallRecord(
@@ -435,25 +437,15 @@ def make_nodes(svc: GraphServices) -> dict[str, NodeFn]:
                 )
             )
 
-        max_steps = affordable_step_count(
-            preset,
-            budget_limit=budget_limit,
-            pricing=svc.pricing,
-            generation_model=svc.generation_model,
-            default_expected_generations=svc.default_expected_generations,
-        )
-        steps, trim_note = fit_to_budget(raw_steps, max_steps)
-        kept = [s for s in steps if s.status != "skipped"]
         cost = estimate_cost(
             preset,
             budget_limit=budget_limit,
             pricing=svc.pricing,
             generation_model=svc.generation_model,
-            default_expected_generations=svc.default_expected_generations,
-            step_count=max(len(kept), 1),
+            step_count=len(steps),
         )
         proposed = Plan(
-            summary=_plan_summary(preset, analysis, steps, state.get("slots", {}), trim_note),
+            summary=_plan_summary(preset, analysis, steps, state.get("slots", {}), cost.note),
             compositions=[
                 CompositionChoice(id=c.id, label=c.label, preview_asset=c.preview_asset)
                 for c in preset.compositions

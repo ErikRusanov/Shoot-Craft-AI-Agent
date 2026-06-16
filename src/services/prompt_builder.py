@@ -55,12 +55,24 @@ _LOCKED_SUFFIX = (
     "untouchable."
 )
 _ONLY_CHANGE_PREFIX = "The ONLY change allowed in this edit is: "
-_TEXTURE_BLOCK = (
+_TEXTURE_BLOCK_HEAD = (
     "Keep the face at the exact original sharpness, grain and raw skin texture — no "
-    "plastic or waxy skin, no airbrushing, no blur on the face. Where the change "
-    "meets the scene, match the existing light direction and keep shadows, "
-    "reflections and grain consistent with the rest of the photo."
+    "plastic or waxy skin, no airbrushing, no blur on the face. "
 )
+_TEXTURE_BLOCK_TAIL = (
+    " and keep shadows, reflections and grain consistent with the rest of the photo."
+)
+
+
+def _texture_block(lighting: str | None) -> str:
+    """Integration block, optionally anchored to the photo's extracted lighting."""
+    if lighting and lighting.strip():
+        mid = f"Where the change meets the scene, match the {lighting.strip()}"
+    else:
+        mid = "Where the change meets the scene, match the existing light direction"
+    return _TEXTURE_BLOCK_HEAD + mid + _TEXTURE_BLOCK_TAIL
+
+
 _APPLIED_SUFFIX = " (already final — keep it exactly)"
 
 # Inventory fields in render order, with their human labels. Only the fields in
@@ -350,6 +362,7 @@ def assemble_edit_prompt(
     only_change: str,
     lock_items: Sequence[str],
     locks: Mapping[str, str] | None = None,
+    lighting: str | None = None,
 ) -> BuiltPrompt:
     """Assemble the edit-mode prompt: lock block + single-change scope + body.
 
@@ -381,7 +394,7 @@ def assemble_edit_prompt(
         _LOCKED_PREFIX + "; ".join(items) + "." + _LOCKED_SUFFIX,
         f"{_ONLY_CHANGE_PREFIX}{change.rstrip('.')}.",
         body.strip(),
-        _TEXTURE_BLOCK,
+        _texture_block(lighting),
     ]
     if locks:
         rendered = "; ".join(f"{name} — {value}" for name, value in sorted(locks.items()))
